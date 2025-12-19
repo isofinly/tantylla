@@ -1,0 +1,13 @@
+services:
+  scylla:
+    image: scylladb/scylla:latest
+    container_name: scylla-test
+    command: ["--smp", "1", "--memory", "750M", "--developer-mode", "1"]
+    ports:
+      - "9042:9042"
+    restart: no
+    healthcheck:
+      test: ["CMD-SHELL", "nodetool status | grep -w 'UN' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
