@@ -23,6 +23,13 @@
           inherit system overlays;
         };
 
+        protoTools = with pkgs; [
+          buf
+          protobuf
+          protoc-gen-rust
+          protoc-gen-rust-grpc
+        ];
+
         cql_lsp = pkgs.rustPlatform.buildRustPackage rec {
           pname = "cql_lsp";
           version = "1.0.3";
@@ -60,23 +67,27 @@
       in
       {
         devShells.default = pkgs.mkShell {
-          buildInputs = with pkgs; [
-            (rust-bin.stable.latest.default.override {
-              extensions = [
-                "rust-src"
-                "rust-analyzer"
-              ];
-            })
-            openssl
-            pkg-config
-            cassandra
-            cql_lsp
-            cargo-deny
-          ];
+          buildInputs =
+            with pkgs;
+            [
+              (rust-bin.stable.latest.default.override {
+                extensions = [
+                  "rust-src"
+                  "rust-analyzer"
+                ];
+              })
+              openssl
+              pkg-config
+              cassandra
+              cql_lsp
+              cargo-deny
+            ]
+            ++ protoTools;
 
           shellHook = ''
             rustc --version
             cqlsh --version
+            buf --version
           '';
         };
       }
