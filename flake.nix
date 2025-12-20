@@ -84,6 +84,10 @@
             ]
             ++ protoTools;
 
+          env = {
+            OUT_DIR="~/.cargo-target/proto";
+          };
+
           shellHook = ''
             rustc --version
             cqlsh --version

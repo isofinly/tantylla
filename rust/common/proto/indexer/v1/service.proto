@@ -1,0 +1,121 @@
+syntax = "proto3";
+
+package indexer.v1;
+
+// Service definition for the "Dumb" Search Node.
+// It handles writing data (indexing) and reading data (searching).
+service IndexService {
+  // Pushes a batch of CDC changes to the node.
+  // Using batches is critical for high throughput to reduce gRPC overhead.
+  rpc IndexBatch(IndexBatchRequest) returns (IndexBatchResponse);
+
+  // Executes a search query against the local Tantivy index.
+  rpc Search(SearchRequest) returns (SearchResponse);
+
+  // Simple health check for the Ingestor/Gateway to know if this node is alive.
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+}
+
+// ------------------------------------------------------------
+// Indexing Messages
+// ------------------------------------------------------------
+
+message IndexBatchRequest {
+  repeated IndexOperation operations = 1;
+}
+
+message IndexOperation {
+  // The specific operation type derived from Scylla CDC 'operation' column.
+  enum OpType {
+    // Default value, should not be used explicitly.
+    OP_TYPE_UNSPECIFIED = 0;
+    // Insert or Update (Tantivy handles both as "delete old + add new").
+    OP_TYPE_UPSERT = 1;
+    // Hard delete (Tombstone).
+    OP_TYPE_DELETE = 2;
+  }
+
+  // The unique Primary Key of the row (e.g., UUID or String).
+  // Used for:
+  // 1. Term deletion (to remove previous versions).
+  // 2. Deduplication.
+  string id = 1;
+
+  // The operation type (Upsert or Delete).
+  OpType op_type = 2;
+
+  // ScyllaDB 'writetime' (microseconds).
+  // CRITICAL FOR CORRECTNESS:
+  // The Node must compare this against the stored doc's timestamp.
+  // If incoming_writetime < stored_writetime, the operation is ignored.
+  int64 writetime = 3;
+
+  // The actual data to index.
+  // - For UPSERT: A JSON string representing the row columns.
+  // - For DELETE: Empty (we only need the ID to delete).
+  // We use string (JSON) for flexibility so the schema can evolve
+  // without changing the Proto definition.
+  string payload_json = 4;
+}
+
+message IndexBatchResponse {
+  // Number of operations successfully processed.
+  uint32 processed_count = 1;
+  // Number of operations skipped (e.g., due to stale writetime).
+  uint32 skipped_count = 2;
+  // If the batch failed partially, details can go here.
+  // For MVP, usually fail-fast or success.
+  bool success = 3;
+}
+
+// ------------------------------------------------------------
+// Search Messages
+// ------------------------------------------------------------
+
+message SearchRequest {
+  // The raw query string (e.g., "title:apple AND description:fruit").
+  // This is passed directly to Tantivy's QueryParser.
+  string query = 1;
+
+  // Max number of results to return (Top N).
+  uint32 limit = 2;
+
+  // Number of results to skip (for basic pagination).
+  uint32 offset = 3;
+}
+
+message SearchResponse {
+  // The list of matching documents.
+  repeated SearchHit hits = 1;
+
+  // Total estimated number of documents matching the query
+  // (not just the returned limit).
+  uint64 total_hits = 2;
+
+  // Duration of the search in the node (debug/monitoring).
+  uint64 duration_ms = 3;
+}
+
+message SearchHit {
+  // The document ID.
+  string id = 1;
+
+  // The relevance score calculated by BM25.
+  float score = 2;
+
+  // The stored document content (as JSON).
+  // Gateway will aggregate these.
+  string payload_json = 3;
+}
+
+// ------------------------------------------------------------
+// Health Messages
+// ------------------------------------------------------------
+
+message HealthCheckRequest {}
+
+message HealthCheckResponse {
+  bool serving = 1;
+  // Optional: Report disk usage or memory pressure to the load balancer
+  uint64 index_size_bytes = 2;
+}
