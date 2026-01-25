@@ -3,5 +3,6 @@ members = [
     "common",
     "node",
     "ingestor",
+    "gateway"
 ]
 resolver = "3"
