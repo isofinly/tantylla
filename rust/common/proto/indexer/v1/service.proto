@@ -50,12 +50,16 @@ message IndexOperation {
   // If incoming_writetime < stored_writetime, the operation is ignored.
   int64 writetime = 3;
 
+  // ScyllaDB 'ttl' (seconds).
+  // Used to determine if the document should be deleted after a certain time.
+  optional int64 cdc_ttl = 4;
+
   // The actual data to index.
   // - For UPSERT: A JSON string representing the row columns.
   // - For DELETE: Empty (we only need the ID to delete).
   // We use string (JSON) for flexibility so the schema can evolve
   // without changing the Proto definition.
-  string payload_json = 4;
+  string payload_json = 5;
 }
 
 message IndexBatchResponse {
@@ -116,6 +120,4 @@ message HealthCheckRequest {}
 
 message HealthCheckResponse {
   bool serving = 1;
-  // Optional: Report disk usage or memory pressure to the load balancer
-  uint64 index_size_bytes = 2;
 }

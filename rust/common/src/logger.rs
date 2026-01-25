@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use tracing::Level;
+use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 /// Configuration options for the logger
@@ -33,7 +34,7 @@ pub fn init_logger(log_level: Level) {
 }
 
 /// Initialize the logger with custom configuration
-pub fn init_logger_with_config(config: LoggerConfig) {
+pub fn init_logger_with_config(config: LoggerConfig) -> Option<WorkerGuard> {
     let stdout_filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&config.level));
 
@@ -47,31 +48,22 @@ pub fn init_logger_with_config(config: LoggerConfig) {
         .with_ansi(true)
         .with_filter(stdout_filter);
 
-    let file_layer = config.file_path.as_ref().map(|file_path| {
-        if let Some(parent) = file_path.parent() {
-            std::fs::create_dir_all(parent).expect("Failed to create log directory");
-        }
-
+    let (file_layer, guard) = if let Some(ref file_path) = config.file_path {
         let file = std::fs::File::create(file_path).expect("Failed to create log file");
         let (non_blocking, guard) = tracing_appender::non_blocking(file);
-        // The guard must be kept alive for the duration of the program.
-        // Forgetting it is the easiest way to achieve this for a global logger.
-        std::mem::forget(guard);
 
         let file_filter = EnvFilter::try_from_default_env()
             .unwrap_or_else(|_| EnvFilter::new(&config.file_level));
 
-        fmt::layer()
-            .with_timer(fmt::time::ChronoLocal::new(
-                "%Y-%m-%d %H:%M:%S%.3f".to_string(),
-            ))
-            .with_target(true)
-            .with_file(true)
-            .with_line_number(true)
+        let layer = fmt::layer()
             .with_ansi(false)
             .with_writer(non_blocking)
-            .with_filter(file_filter)
-    });
+            .with_filter(file_filter);
+
+        (Some(layer), Some(guard))
+    } else {
+        (None, None)
+    };
 
     tracing_subscriber::registry()
         .with(stdout_layer)
@@ -86,4 +78,6 @@ pub fn init_logger_with_config(config: LoggerConfig) {
             path.display()
         );
     }
+
+    guard
 }
