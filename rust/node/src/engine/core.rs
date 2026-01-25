@@ -6,7 +6,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use tantivy::collector::{Count, TopDocs};
 use tantivy::query::{BooleanQuery, Occur, QueryParser, RangeQuery};
-use tantivy::schema::{FAST, Field, STORED, STRING, Schema, TEXT, Value};
+use tantivy::schema::{
+    FAST, Field, IndexRecordOption, JsonObjectOptions, STORED, STRING, Schema, TEXT,
+    TextFieldIndexing, TextOptions, Value,
+};
+use tantivy::tokenizer::{NgramTokenizer, TextAnalyzer};
 use tantivy::{Document, Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument, Term};
 use tantylla_common::indexer::index_operation::OpType;
 use tantylla_common::indexer::{IndexBatchResponse, IndexOperation, SearchHit, SearchResponse};
@@ -14,7 +18,7 @@ use tracing::{error, info, trace, warn};
 
 const WRITER_BUFFER_SIZE: usize = 50_000_000; // 50MB buffer
 const COMMIT_INTERVAL: Duration = Duration::from_secs(5);
-const PRUNE_INTERVAL: Duration = Duration::from_secs(5);
+const PRUNE_INTERVAL: Duration = Duration::from_secs(50);
 
 #[derive(Clone)]
 pub(crate) struct Engine {
@@ -35,8 +39,15 @@ impl Engine {
 
         let mut schema_builder = Schema::builder();
         let field_id = schema_builder.add_text_field("id", STRING | STORED);
-        let field_doc = schema_builder.add_json_field("document", TEXT | STORED);
         let field_expires_at = schema_builder.add_i64_field("expires_at", FAST | STORED);
+        let json_options = JsonObjectOptions::default()
+            .set_stored()
+            .set_indexing_options(
+                TextFieldIndexing::default()
+                    .set_tokenizer("en_stem")
+                    .set_index_option(IndexRecordOption::WithFreqsAndPositions),
+            );
+        let field_doc = schema_builder.add_json_field("document", json_options);
         let schema = schema_builder.build();
 
         let index = Index::open_or_create(
@@ -109,7 +120,7 @@ impl Engine {
                             processed += 1;
                         }
                         Err(e) => {
-                            warn!(
+                            error!(
                                 "Skipping doc {}: Failed to parse json for schema: {}",
                                 op.id, e
                             );
