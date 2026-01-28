@@ -29,7 +29,7 @@ async fn main() -> anyhow::Result<()> {
 
     let addr = format!("{}:{}", args.address, args.port).parse().unwrap();
 
-    let svc = IndexServiceService::new("./index")?;
+    let svc = IndexServiceService::new(format!("./index-{}", args.port))?;
 
     let server = IndexServiceServer::new(svc);
 
