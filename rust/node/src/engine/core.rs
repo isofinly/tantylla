@@ -8,14 +8,13 @@ use anyhow::{Context, Result};
 use tantivy::collector::{Count, TopDocs};
 use tantivy::query::{BooleanQuery, Occur, QueryParser, RangeQuery};
 use tantivy::schema::{
-    FAST, Field, IndexRecordOption, JsonObjectOptions, STORED, STRING, Schema, TEXT,
-    TextFieldIndexing, TextOptions, Value,
+    FAST, Field, IndexRecordOption, JsonObjectOptions, STORED, STRING, Schema, TextFieldIndexing,
+    Value,
 };
-use tantivy::tokenizer::{NgramTokenizer, TextAnalyzer};
 use tantivy::{Document, Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument, Term};
 use tantylla_common::indexer::index_operation::OpType;
 use tantylla_common::indexer::{IndexBatchResponse, IndexOperation, SearchHit, SearchResponse};
-use tracing::{error, info, trace, warn};
+use tracing::{error, info, trace};
 
 const WRITER_BUFFER_SIZE: usize = 50_000_000; // 50MB buffer
 const COMMIT_INTERVAL: Duration = Duration::from_secs(5);
