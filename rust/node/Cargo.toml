@@ -27,6 +27,7 @@ tracing = "0.1.44"
 
 tantylla-common = { path = "../common" }
 tantivy = { version = "0.25.0", features = ["mmap"] }
+ahash = "0.8.12"
 
 [build-dependencies]
 tonic-prost-build = "0.14"
