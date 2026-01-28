@@ -121,7 +121,11 @@ impl Service {
         for (target_node, operations) in node_batches {
             tokio::spawn(async move {
                 // TODO: Assumes all communication is http.
-                let address = format!("http://{}", target_node);
+                let address = if !target_node.starts_with("http") {
+                    format!("http://{}", target_node)
+                } else {
+                    target_node.clone()
+                };
                 match IndexServiceClient::connect(address.clone()).await {
                     Ok(mut client) => {
                         let request = tonic::Request::new(IndexBatchRequest { operations });
