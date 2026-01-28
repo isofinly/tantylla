@@ -67,7 +67,17 @@ impl Router {
             _ => return Ok(()),
         };
 
-        let id = format!("{}:{}:{}", target_node_id, row.time, row.batch_seq_no);
+        let pk_values: Vec<String> = self
+            .pk_columns
+            .iter()
+            .map(|col_name| match row.get_value(col_name) {
+                Some(val) => format!("{}", val),
+                None => "null".to_string(),
+            })
+            .collect();
+
+        let id = pk_values.join(":");
+
         let writetime = utils::extract_writetime_from_timeuuid(row.time)?;
         let cdc_ttl = row.ttl;
         let payload_json = if matches!(op_type, OpType::Upsert) {
@@ -77,7 +87,6 @@ impl Router {
         };
 
         let batch_item = BatchItem {
-            // TODO
             target_node: target_node.clone(),
             id,
             op_type: op_type as i32,

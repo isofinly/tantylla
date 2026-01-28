@@ -1,5 +1,6 @@
 use anyhow::Result;
 use base64::{Engine, engine::general_purpose};
+use bigdecimal::BigDecimal;
 use scylla::{client::session::Session, value::CqlValue};
 use serde_json::{Map, Value};
 use std::hash::Hasher;
@@ -29,8 +30,6 @@ pub(super) fn serialize_row_to_json(
         if let Some(cql_value) = row.get_value(column_name) {
             let json_value = cql_to_json(cql_value);
             doc.insert(column_name.to_string(), json_value);
-        } else {
-            doc.insert(column_name.to_string(), Value::Null);
         }
     }
 
@@ -54,6 +53,10 @@ fn cql_to_json(val: &CqlValue) -> Value {
         CqlValue::Boolean(b) => Value::Bool(*b),
         CqlValue::Int(i) => Value::Number((*i).into()),
         CqlValue::BigInt(i) => Value::Number((*i).into()),
+        CqlValue::Decimal(d) => {
+            let bd: BigDecimal = d.clone().into();
+            Value::String(bd.to_string())
+        }
         CqlValue::Double(f) => serde_json::Number::from_f64(*f)
             .map(Value::Number)
             .unwrap_or(Value::Null), // Handle NaN/Infinite

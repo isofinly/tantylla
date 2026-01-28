@@ -30,7 +30,7 @@ struct Args {
     #[arg(
         long,
         value_delimiter = ',',
-        help = "List of node addresses. Order matters since it determines node ID, e.g. 127.0.0.1:10000,127.0.0.1:10001",
+        help = "List of node addresses, e.g. 127.0.0.1:10000,127.0.0.1:10001",
         required = true
     )]
     search_nodes: Vec<String>,
@@ -85,7 +85,9 @@ async fn main() -> anyhow::Result<()> {
     info!("Connected to ScyllaDB at {:?}", &scylla_uris);
 
     let mut node_info = ahash::AHashMap::new();
-    for (i, addr) in args.search_nodes.iter().enumerate() {
+    let mut nodes = args.search_nodes.clone();
+    nodes.sort();
+    for (i, addr) in nodes.iter().enumerate() {
         node_info.insert(i, addr.to_string());
     }
 
