@@ -3,7 +3,6 @@ use std::path::Path;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use ahash::AHashMap;
 use anyhow::{Context, Result};
 use tantivy::collector::{Count, TopDocs};
 use tantivy::query::{BooleanQuery, Occur, QueryParser, RangeQuery};
@@ -17,24 +16,38 @@ use tantylla_common::indexer::{IndexBatchResponse, IndexOperation, SearchHit, Se
 use tracing::{error, info, trace};
 
 const WRITER_BUFFER_SIZE: usize = 50_000_000; // 50MB buffer
-const COMMIT_INTERVAL: Duration = Duration::from_secs(5);
 const PRUNE_INTERVAL: Duration = Duration::from_secs(50);
+
+/// Time-based commit configuration.
+/// Commits happen at fixed intervals to make documents visible for search.
+#[derive(Clone, Copy, Debug)]
+pub struct AdaptiveConfig {
+    /// Time interval between commits (in seconds)
+    pub commit_interval_secs: u64,
+}
+
+impl Default for AdaptiveConfig {
+    fn default() -> Self {
+        Self {
+            commit_interval_secs: 5,
+        }
+    }
+}
 
 #[derive(Clone)]
 pub(crate) struct Engine {
     index: Index,
     reader: IndexReader,
     writer: Arc<RwLock<IndexWriter>>,
-    uncommitted_docs: Arc<RwLock<AHashMap<String, serde_json::Value>>>,
     schema: Schema,
-    // TODO: Move it somewhere else
     field_id: Field,
     field_doc: Field,
     field_expires_at: Field,
+    config: AdaptiveConfig,
 }
 
 impl Engine {
-    pub(crate) fn new(path: impl AsRef<Path>) -> Result<Self> {
+    pub(crate) fn new(path: impl AsRef<Path>, config: AdaptiveConfig) -> Result<Self> {
         let path = path.as_ref();
         std::fs::create_dir_all(path).context("Failed to create index directory")?;
 
@@ -67,21 +80,24 @@ impl Engine {
             index,
             reader,
             writer: Arc::new(RwLock::new(writer)),
-            uncommitted_docs: Arc::new(RwLock::new(AHashMap::new())),
             schema,
             field_id,
             field_doc,
             field_expires_at,
+            config,
         };
 
         engine.spawn_committer();
         engine.spawn_pruner();
 
+        info!(
+            "Engine initialized with commit interval: {}s",
+            config.commit_interval_secs
+        );
+
         Ok(engine)
     }
 
-    /// Process a batch of operations.
-    /// Returns (processed_count, skipped_count).
     pub(crate) fn process_batch(
         &self,
         operations: Vec<IndexOperation>,
@@ -90,12 +106,6 @@ impl Engine {
             .writer
             .write()
             .map_err(|_| anyhow::anyhow!("Lock poisoned"))?;
-        let mut uncommitted = self
-            .uncommitted_docs
-            .write()
-            .map_err(|_| anyhow::anyhow!("Cache Lock poisoned"))?;
-
-        let searcher = self.reader.searcher();
 
         let mut processed = 0;
         let mut skipped = 0;
@@ -110,45 +120,11 @@ impl Engine {
                     let patch_json: serde_json::Value =
                         serde_json::from_str(&op.payload_json).unwrap_or(serde_json::Value::Null);
 
-                    let mut current_doc_json = if let Some(cached_doc) = uncommitted.get(&op.id) {
-                        cached_doc.clone()
+                    let full_doc = if patch_json.is_object() {
+                        patch_json
                     } else {
-                        // TODO: This is a synchronous search per item.
-                        let term_query =
-                            tantivy::query::TermQuery::new(term.clone(), IndexRecordOption::Basic);
-                        let top_docs = searcher
-                            .search(&term_query, &TopDocs::with_limit(1))
-                            .unwrap_or_default();
-
-                        if let Some((_, doc_addr)) = top_docs.first() {
-                            let retrieved: TantivyDocument =
-                                searcher.doc(*doc_addr).unwrap_or_default();
-
-                            let doc_str = retrieved.to_json(&self.schema);
-
-                            if let Ok(mut full_doc_val) =
-                                serde_json::from_str::<serde_json::Value>(&doc_str)
-                            {
-                                match full_doc_val.get_mut("document") {
-                                    Some(serde_json::Value::Array(arr)) => {
-                                        if !arr.is_empty() {
-                                            std::mem::take(&mut arr[0])
-                                        } else {
-                                            serde_json::json!({})
-                                        }
-                                    }
-                                    Some(other) => other.clone(),
-                                    None => serde_json::json!({}),
-                                }
-                            } else {
-                                serde_json::json!({})
-                            }
-                        } else {
-                            serde_json::json!({})
-                        }
+                        serde_json::json!({})
                     };
-
-                    merge_json(&mut current_doc_json, patch_json);
 
                     let expires_at = if let Some(ttl) = op.cdc_ttl {
                         op.writetime + (ttl * 1_000_000)
@@ -156,12 +132,10 @@ impl Engine {
                         i64::MAX
                     };
 
-                    uncommitted.insert(op.id.clone(), current_doc_json.clone());
-
                     let full_doc_wrapper = serde_json::json!({
                         "id": op.id,
                         "expires_at": expires_at,
-                        "document": current_doc_json
+                        "document": full_doc
                     });
 
                     writer.delete_term(term);
@@ -180,7 +154,6 @@ impl Engine {
                 OpType::Delete => {
                     let term = Term::from_field_text(self.field_id, &op.id);
                     writer.delete_term(term);
-                    uncommitted.remove(&op.id);
                     processed += 1;
                 }
                 _ => skipped += 1,
@@ -188,8 +161,8 @@ impl Engine {
         }
 
         Ok(IndexBatchResponse {
-            processed_count: processed,
-            skipped_count: skipped,
+            processed_count: processed as u32,
+            skipped_count: skipped as u32,
             success: true,
         })
     }
@@ -265,29 +238,27 @@ impl Engine {
 
     fn spawn_committer(&self) {
         let writer_lock = self.writer.clone();
-        let uncommitted_lock = self.uncommitted_docs.clone();
         let reader = self.reader.clone();
+        let interval_duration = Duration::from_secs(self.config.commit_interval_secs);
 
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(COMMIT_INTERVAL);
+            let mut interval = tokio::time::interval(interval_duration);
+
             loop {
                 interval.tick().await;
-                if let Ok(mut writer) = writer_lock.try_write() {
+
+                if let Ok(mut writer) = writer_lock.write() {
                     match writer.commit() {
                         Ok(opstamp) => {
-                            info!("Auto-commit successful. Opstamp: {}", opstamp);
+                            info!("Commit. Opstamp: {}", opstamp);
+
                             if let Err(e) = reader.reload() {
                                 error!("Failed to reload reader: {}", e);
                             }
-                            if let Ok(mut uncommitted) = uncommitted_lock.write() {
-                                uncommitted.clear();
-                                trace!("Uncommitted cache cleared");
-                            }
                         }
-                        Err(e) => error!("Auto-commit failed: {}", e),
+                        Err(e) => error!("Commit failed: {}", e),
                     }
                 }
-                // Contended, skip commit
             }
         });
     }
@@ -309,8 +280,8 @@ impl Engine {
                         Ok(opstamp) => {
                             info!("Pruned expired docs. Opstamp: {}", opstamp);
                             match writer.commit() {
-                                Ok(_) => info!("Auto-commit successful"),
-                                Err(e) => error!("Auto-commit failed: {}", e),
+                                Ok(_) => info!("Prune commit successful"),
+                                Err(e) => error!("Prune commit failed: {}", e),
                             }
                         }
                         Err(e) => error!("Pruning failed: {}", e),
@@ -326,16 +297,4 @@ fn now_micros() -> i64 {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_micros() as i64
-}
-
-fn merge_json(a: &mut serde_json::Value, b: serde_json::Value) {
-    match (a, b) {
-        (a @ &mut serde_json::Value::Object(_), serde_json::Value::Object(b)) => {
-            let a = a.as_object_mut().unwrap();
-            for (k, v) in b {
-                merge_json(a.entry(k).or_insert(serde_json::Value::Null), v);
-            }
-        }
-        (a, b) => *a = b,
-    }
 }
