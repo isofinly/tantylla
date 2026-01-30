@@ -39,7 +39,9 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Initializing Gateway...");
 
     let mut clients: Vec<IndexServiceClient<Channel>> = Vec::new();
-    for addr in args.search_nodes {
+    let mut nodes = args.search_nodes.clone();
+    nodes.sort();
+    for addr in nodes {
         let addr = if !addr.starts_with("http") {
             format!("http://{}", addr)
         } else {
