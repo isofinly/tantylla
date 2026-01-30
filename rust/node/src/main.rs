@@ -3,6 +3,7 @@ use tantylla_common::{indexer::index_service_server::IndexServiceServer, logger}
 use tonic::transport::Server;
 use tracing::info;
 
+use crate::engine::core::AdaptiveConfig;
 use crate::service::core::IndexServiceService;
 
 mod engine;
@@ -15,6 +16,10 @@ struct Args {
     port: u16,
     #[arg(long, default_value = "[::1]")]
     address: String,
+    
+    /// Commit interval in seconds (documents become visible after this time)
+    #[arg(long, default_value = "5")]
+    commit_interval_secs: u64,
 }
 
 #[tokio::main]
@@ -29,7 +34,11 @@ async fn main() -> anyhow::Result<()> {
 
     let addr = format!("{}:{}", args.address, args.port).parse().unwrap();
 
-    let svc = IndexServiceService::new(format!("./index-{}", args.port))?;
+    let config = AdaptiveConfig {
+        commit_interval_secs: args.commit_interval_secs,
+    };
+
+    let svc = IndexServiceService::new(format!("./index-{}", args.port), config)?;
 
     let server = IndexServiceServer::new(svc);
 

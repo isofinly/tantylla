@@ -38,21 +38,37 @@ struct Args {
     // In debug builds we use a short safety interval (500 ms);
     // in release builds the default is 30 seconds.
     #[cfg(debug_assertions)]
-    #[arg(long, default_value = "500")]
+    #[arg(
+        long,
+        default_value = "500",
+        help = "Interval between safety checks in milliseconds"
+    )]
     safety_interval: u64,
 
     #[cfg(not(debug_assertions))]
-    #[arg(long, default_value = "30_000")]
+    #[arg(
+        long,
+        default_value = "30_000",
+        help = "Interval between safety checks in milliseconds"
+    )]
     safety_interval: u64,
 
     // In debug builds we poll every 500 ms;
     // in release builds we sleep 10 seconds between polls.
     #[cfg(debug_assertions)]
-    #[arg(long, default_value = "500")]
+    #[arg(
+        long,
+        default_value = "500",
+        help = "Interval between polls in milliseconds"
+    )]
     sleep_interval: u64,
 
     #[cfg(not(debug_assertions))]
-    #[arg(long, default_value = "10_000")]
+    #[arg(
+        long,
+        default_value = "10_000",
+        help = "Interval between polls in milliseconds"
+    )]
     sleep_interval: u64,
 }
 
@@ -118,8 +134,8 @@ async fn main() -> anyhow::Result<()> {
         .keyspace(keyspace)
         .table_name(table)
         .consumer_factory(factory)
-        .safety_interval(time::Duration::from_millis(500))
-        .sleep_interval(time::Duration::from_millis(500))
+        .safety_interval(time::Duration::from_millis(args.safety_interval))
+        .sleep_interval(time::Duration::from_millis(args.sleep_interval))
         .build()
         .await?;
 

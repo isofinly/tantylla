@@ -1,4 +1,4 @@
-use crate::engine::core::Engine;
+use crate::engine::core::{AdaptiveConfig, Engine};
 use anyhow::Result;
 use tantylla_common::{
     self,
@@ -16,8 +16,11 @@ pub struct IndexServiceService {
 }
 
 impl IndexServiceService {
-    pub fn new(engine_path: impl AsRef<std::path::Path>) -> Result<Self> {
-        let engine = Engine::new(engine_path)?;
+    pub fn new(
+        engine_path: impl AsRef<std::path::Path>,
+        config: AdaptiveConfig,
+    ) -> Result<Self> {
+        let engine = Engine::new(engine_path, config)?;
         Ok(IndexServiceService { engine })
     }
 }
