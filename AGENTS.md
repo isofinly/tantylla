@@ -63,7 +63,15 @@ Focus on optimizing the slowest resources, typically in this order:
 
 ### Project Architecture
 
-- TODO
+```
+.
+├── rust/ # All rust code. There's an AGENTS.md file specific to Rust components. Make sure to provide correct path. There's no rust code in the root of the project.
+├── cql-queries/ # CQL queries for ScyllaDB
+├── compose.yaml # Configuration to run dev scylladb
+├── flake.nix # Configuration of all environment for this project
+├── README.md # Description of the project
+└── AGENTS.md # This file
+```
 
 ### Commands
 

@@ -238,7 +238,6 @@ impl Engine {
 
     fn spawn_committer(&self) {
         let writer_lock = self.writer.clone();
-        let reader = self.reader.clone();
         let interval_duration = Duration::from_secs(self.config.commit_interval_secs);
 
         tokio::spawn(async move {
@@ -251,10 +250,6 @@ impl Engine {
                     match writer.commit() {
                         Ok(opstamp) => {
                             info!("Commit. Opstamp: {}", opstamp);
-
-                            if let Err(e) = reader.reload() {
-                                error!("Failed to reload reader: {}", e);
-                            }
                         }
                         Err(e) => error!("Commit failed: {}", e),
                     }
