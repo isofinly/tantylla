@@ -3,6 +3,7 @@ use std::path::Path;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use ahash::AHashMap;
 use anyhow::{Context, Result};
 use tantivy::collector::{Count, TopDocs};
 use tantivy::query::{BooleanQuery, Occur, QueryParser, RangeQuery};
@@ -40,10 +41,13 @@ pub(crate) struct Engine {
     reader: IndexReader,
     writer: Arc<RwLock<IndexWriter>>,
     schema: Schema,
+    // TODO: Move it somewhere else
     field_id: Field,
     field_doc: Field,
     field_expires_at: Field,
     config: AdaptiveConfig,
+    // TODO: Handle it somehow
+    uncommitted_docs: Arc<RwLock<AHashMap<String, serde_json::Value>>>,
 }
 
 impl Engine {
@@ -85,15 +89,11 @@ impl Engine {
             field_doc,
             field_expires_at,
             config,
+            uncommitted_docs: Arc::new(RwLock::new(AHashMap::new())),
         };
 
         engine.spawn_committer();
         engine.spawn_pruner();
-
-        info!(
-            "Engine initialized with commit interval: {}s",
-            config.commit_interval_secs
-        );
 
         Ok(engine)
     }
@@ -106,6 +106,12 @@ impl Engine {
             .writer
             .write()
             .map_err(|_| anyhow::anyhow!("Lock poisoned"))?;
+        let mut uncommitted = self
+            .uncommitted_docs
+            .write()
+            .map_err(|_| anyhow::anyhow!("Cache Lock poisoned"))?;
+
+        let searcher = self.reader.searcher();
 
         let mut processed = 0;
         let mut skipped = 0;
@@ -120,11 +126,45 @@ impl Engine {
                     let patch_json: serde_json::Value =
                         serde_json::from_str(&op.payload_json).unwrap_or(serde_json::Value::Null);
 
-                    let full_doc = if patch_json.is_object() {
-                        patch_json
+                    let mut current_doc_json = if let Some(cached_doc) = uncommitted.get(&op.id) {
+                        cached_doc.clone()
                     } else {
-                        serde_json::json!({})
+                        // TODO: This is a synchronous search per item.
+                        let term_query =
+                            tantivy::query::TermQuery::new(term.clone(), IndexRecordOption::Basic);
+                        let top_docs = searcher
+                            .search(&term_query, &TopDocs::with_limit(1))
+                            .unwrap_or_default();
+
+                        if let Some((_, doc_addr)) = top_docs.first() {
+                            let retrieved: TantivyDocument =
+                                searcher.doc(*doc_addr).unwrap_or_default();
+
+                            let doc_str = retrieved.to_json(&self.schema);
+
+                            if let Ok(mut full_doc_val) =
+                                serde_json::from_str::<serde_json::Value>(&doc_str)
+                            {
+                                match full_doc_val.get_mut("document") {
+                                    Some(serde_json::Value::Array(arr)) => {
+                                        if !arr.is_empty() {
+                                            std::mem::take(&mut arr[0])
+                                        } else {
+                                            serde_json::json!({})
+                                        }
+                                    }
+                                    Some(other) => other.clone(),
+                                    None => serde_json::json!({}),
+                                }
+                            } else {
+                                serde_json::json!({})
+                            }
+                        } else {
+                            serde_json::json!({})
+                        }
                     };
+
+                    merge_json(&mut current_doc_json, patch_json);
 
                     let expires_at = if let Some(ttl) = op.cdc_ttl {
                         op.writetime + (ttl * 1_000_000)
@@ -132,10 +172,12 @@ impl Engine {
                         i64::MAX
                     };
 
+                    uncommitted.insert(op.id.clone(), current_doc_json.clone());
+
                     let full_doc_wrapper = serde_json::json!({
                         "id": op.id,
                         "expires_at": expires_at,
-                        "document": full_doc
+                        "document": current_doc_json
                     });
 
                     writer.delete_term(term);
@@ -154,6 +196,7 @@ impl Engine {
                 OpType::Delete => {
                     let term = Term::from_field_text(self.field_id, &op.id);
                     writer.delete_term(term);
+                    uncommitted.remove(&op.id);
                     processed += 1;
                 }
                 _ => skipped += 1,
@@ -161,8 +204,8 @@ impl Engine {
         }
 
         Ok(IndexBatchResponse {
-            processed_count: processed as u32,
-            skipped_count: skipped as u32,
+            processed_count: processed,
+            skipped_count: skipped,
             success: true,
         })
     }
@@ -238,7 +281,7 @@ impl Engine {
 
     fn spawn_committer(&self) {
         let writer_lock = self.writer.clone();
-        let reader = self.reader.clone();
+        let uncommitted_lock = self.uncommitted_docs.clone();
         let interval_duration = Duration::from_secs(self.config.commit_interval_secs);
 
         tokio::spawn(async move {
@@ -246,19 +289,19 @@ impl Engine {
 
             loop {
                 interval.tick().await;
-
-                if let Ok(mut writer) = writer_lock.write() {
+                if let Ok(mut writer) = writer_lock.try_write() {
                     match writer.commit() {
                         Ok(opstamp) => {
-                            info!("Commit. Opstamp: {}", opstamp);
-
-                            if let Err(e) = reader.reload() {
-                                error!("Failed to reload reader: {}", e);
+                            info!("Commit successful. Opstamp: {}", opstamp);
+                            if let Ok(mut uncommitted) = uncommitted_lock.write() {
+                                uncommitted.clear();
+                                trace!("Uncommitted cache cleared");
                             }
                         }
                         Err(e) => error!("Commit failed: {}", e),
                     }
                 }
+                // Contended, skip commit
             }
         });
     }
@@ -297,4 +340,16 @@ fn now_micros() -> i64 {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_micros() as i64
+}
+
+fn merge_json(a: &mut serde_json::Value, b: serde_json::Value) {
+    match (a, b) {
+        (a @ &mut serde_json::Value::Object(_), serde_json::Value::Object(b)) => {
+            let a = a.as_object_mut().unwrap();
+            for (k, v) in b {
+                merge_json(a.entry(k).or_insert(serde_json::Value::Null), v);
+            }
+        }
+        (a, b) => *a = b,
+    }
 }

@@ -1,19 +1,23 @@
 use crate::server::core::AppState;
 use futures::future::join_all;
 use std::sync::Arc;
-use tantylla_common::indexer::{SearchHit, SearchRequest, SearchResponse};
+use tantylla_common::indexer::{
+    SearchHit, SearchRequest, SearchResponse, search_request::Consistency,
+};
 use tonic::Request;
 
 /// Broadcasts the query to all connected nodes and aggregates results.
-//
-// TODO: Never fails. Always returns a valid response.
-// 2026-01-28 12:32:56.829 ERROR request{method=POST uri=/api/v1/search version=HTTP/1.1}: tantylla_gateway::querier::core: gateway/src/querier/core.rs:46: Node search failed: status: 'The service is currently unavailable', self: "tcp connect error"
-// 2026-01-28 12:32:56.829  INFO request{method=POST uri=/api/v1/search version=HTTP/1.1}: tower_http::trace::on_response: /Users/isofinly/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tower-http-0.6.8/src/trace/on_response.rs:114: finished processing request latency=3 ms status=200
+///
+/// Consistency levels:
+/// - ANY (default): Query succeeds if at least one node responds. Failed nodes are logged but ignored.
+/// - ALL: Query must succeed on all nodes. If any node fails, the entire query fails.
 pub async fn scatter_gather(
     state: Arc<AppState>,
     req: SearchRequest,
 ) -> Result<SearchResponse, String> {
     let clients = &state.clients;
+    let consistency = req.consistency();
+    let total_nodes = clients.len();
 
     let futures: Vec<_> = clients
         .iter()
@@ -24,7 +28,7 @@ pub async fn scatter_gather(
                 // We request 'limit + offset' from every node to ensure global sorting accuracy
                 // then we slice it locally.
                 let mut node_req = req;
-                node_req.limit = node_req.limit + node_req.offset;
+                node_req.limit += node_req.offset;
                 node_req.offset = 0; // We handle offset globally after merging
 
                 client.search(Request::new(node_req)).await
@@ -37,17 +41,47 @@ pub async fn scatter_gather(
     let mut all_hits: Vec<SearchHit> = Vec::new();
     let mut total_hits: u64 = 0;
     let mut max_duration: u64 = 0;
+    let mut failed_nodes: Vec<String> = Vec::new();
+    let mut successful_nodes = 0;
 
-    for res in results {
+    for (idx, res) in results.into_iter().enumerate() {
         match res {
             Ok(response) => {
                 let inner = response.into_inner();
                 all_hits.extend(inner.hits);
                 total_hits += inner.total_hits;
                 max_duration = std::cmp::max(max_duration, inner.duration_ms);
+                successful_nodes += 1;
             }
             Err(e) => {
-                tracing::error!("Node search failed: {}", e);
+                let error_msg = format!("Node {} search failed: {}", idx, e);
+                tracing::error!("{}", error_msg);
+                failed_nodes.push(error_msg);
+            }
+        }
+    }
+
+    match consistency {
+        Consistency::All => {
+            // ALL consistency: every node must succeed
+            if successful_nodes < total_nodes {
+                let error_msg = format!(
+                    "Consistency ALL failed: {}/{} nodes succeeded. Errors: {:?}",
+                    successful_nodes, total_nodes, failed_nodes
+                );
+                tracing::error!("{}", error_msg);
+                return Err(error_msg);
+            }
+        }
+        _ => {
+            // ANY or UNSPECIFIED (default): at least one node must succeed
+            if successful_nodes == 0 {
+                let error_msg = format!(
+                    "Consistency ANY failed: all {} nodes failed. Errors: {:?}",
+                    total_nodes, failed_nodes
+                );
+                tracing::error!("{}", error_msg);
+                return Err(error_msg);
             }
         }
     }

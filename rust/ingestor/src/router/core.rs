@@ -37,6 +37,7 @@ impl Router {
         })
     }
 
+    #[allow(dead_code)]
     pub async fn with_ticker_and_limit(
         flush_interval: tokio::time::Duration,
         batch_limit: usize,
@@ -51,12 +52,22 @@ impl Router {
         Ok(Router {
             node_info,
             pk_columns,
-            batch_service: Service::with_ticker_and_limit(flush_interval, batch_limit),
+            batch_service: Service::with_params(flush_interval, batch_limit, 3, 100),
         })
     }
 
     pub(crate) async fn route(&self, row: &scylla_cdc::consumer::CDCRow<'_>) -> anyhow::Result<()> {
-        // TODO: This is not a partition key
+        // TODO: Is this really a router's concern?
+        if self.batch_service.is_backpressure_active() {
+            debug!("Backpressure active, attempting to flush before routing");
+            if let Err(e) = self.batch_service.flush().await {
+                return Err(anyhow::anyhow!(
+                    "Backpressure active and flush failed: {}",
+                    e
+                ));
+            }
+        }
+
         let target_node_id = utils::get_target_node_id(row, &self.pk_columns, self.node_info.len());
         let target_node = self.node_info.get(&target_node_id).unwrap();
 
@@ -92,14 +103,17 @@ impl Router {
             op_type: op_type as i32,
             writetime,
             cdc_ttl,
-            payload_json,
+            payload_json: payload_json.clone(),
         };
 
         let batch_item_json = serde_json::to_string(&batch_item)?;
         debug!("Batch item JSON: {}", batch_item_json);
 
-        self.batch_service.add(batch_item_json);
-
-        Ok(())
+        // Add to batch service - this may trigger backpressure if buffer is full
+        // TODO: Maybe implement a retry mechanism to try again?
+        match self.batch_service.add(batch_item_json) {
+            Ok(_) => Ok(()),
+            Err(e) => Err(anyhow::anyhow!("Failed to add batch item: {}", e)),
+        }
     }
 }
