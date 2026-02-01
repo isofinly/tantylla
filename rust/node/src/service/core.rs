@@ -16,10 +16,7 @@ pub struct IndexServiceService {
 }
 
 impl IndexServiceService {
-    pub fn new(
-        engine_path: impl AsRef<std::path::Path>,
-        config: AdaptiveConfig,
-    ) -> Result<Self> {
+    pub fn new(engine_path: impl AsRef<std::path::Path>, config: AdaptiveConfig) -> Result<Self> {
         let engine = Engine::new(engine_path, config)?;
         Ok(IndexServiceService { engine })
     }
@@ -31,7 +28,7 @@ impl IndexService for IndexServiceService {
         &self,
         request: Request<IndexBatchRequest>,
     ) -> Result<Response<IndexBatchResponse>, Status> {
-        debug!("Indexing batch");
+        debug!("Indexing batch with {:?}", request);
         let req = request.into_inner();
         match self.engine.process_batch(req.operations) {
             Ok(response) => Ok(Response::new(response)),
@@ -43,7 +40,7 @@ impl IndexService for IndexServiceService {
         &self,
         request: Request<SearchRequest>,
     ) -> Result<Response<SearchResponse>, Status> {
-        debug!("Searching");
+        debug!("Searching {:?}", request);
         let req = request.into_inner();
         match self
             .engine
