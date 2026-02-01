@@ -69,7 +69,7 @@ fn cql_to_json(val: &CqlValue) -> Value {
         CqlValue::Inet(ip) => Value::String(ip.to_string()),
         CqlValue::Blob(b) => Value::String(general_purpose::STANDARD.encode(b)),
         CqlValue::List(vec) | CqlValue::Set(vec) => {
-            Value::Array(vec.iter().map(|v| cql_to_json(v)).collect())
+            Value::Array(vec.iter().map(cql_to_json).collect())
         }
         CqlValue::Map(pairs) => {
             // JSON keys must be strings. If the CQL map key isn't a string, we stringify it.
@@ -158,7 +158,5 @@ pub(super) fn get_target_node_id(
     }
 
     let hash_value = hasher.finish();
-    let target_node = hash_value as usize % n_search_nodes;
-
-    target_node as usize
+    hash_value as usize % n_search_nodes
 }

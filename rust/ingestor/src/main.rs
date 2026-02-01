@@ -129,6 +129,7 @@ async fn main() -> anyhow::Result<()> {
     let factory = Arc::new(cdc::consumer::ConsumerFactory::new(router));
 
     // TODO: Handle 2026-01-20 17:25:34.874  WARN scylla::cluster::metadata: /Users/isofinly/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/scylla-1.4.1/src/cluster/metadata.rs:641: Failed to fetch metadata using current control connection control_connection_address=127.0.0.1:9043 error=Control connection pool error: The pool is broken; Last connection failed with: Connection refused (os error 61)
+    // TODO: Update builder params for persistent CDC consumption
     let (mut reader, handle) = scylla_cdc::log_reader::CDCLogReaderBuilder::new()
         .session(session.clone())
         .keyspace(keyspace)
