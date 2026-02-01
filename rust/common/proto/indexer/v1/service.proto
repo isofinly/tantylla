@@ -86,6 +86,17 @@ message SearchRequest {
 
   // Number of results to skip (for basic pagination).
   uint32 offset = 3;
+
+  // Consistency level for the search query.
+  // - ALL: Query must succeed on all nodes. If any node fails, the entire query fails.
+  // - ANY: Query succeeds if at least one node responds. Partial results are returned.
+  // Default is ANY for backward compatibility.
+  enum Consistency {
+    CONSISTENCY_UNSPECIFIED = 0;
+    CONSISTENCY_ANY = 1;
+    CONSISTENCY_ALL = 2;
+  }
+  Consistency consistency = 4;
 }
 
 message SearchResponse {
