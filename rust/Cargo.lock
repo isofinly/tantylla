@@ -2073,12 +2073,12 @@ dependencies = [
 name = "tantylla-node"
 version = "0.1.0"
 dependencies = [
- "ahash",
  "anyhow",
  "async-stream",
  "async-trait",
  "chrono",
  "clap",
+ "dashmap",
  "futures",
  "prost",
  "rand 0.8.5",

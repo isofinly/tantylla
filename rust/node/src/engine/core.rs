@@ -3,8 +3,8 @@ use std::path::Path;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use ahash::AHashMap;
 use anyhow::{Context, Result};
+use dashmap::DashMap;
 use tantivy::collector::{Count, TopDocs};
 use tantivy::query::{BooleanQuery, Occur, QueryParser, RangeQuery};
 use tantivy::schema::{
@@ -47,7 +47,7 @@ pub(crate) struct Engine {
     field_expires_at: Field,
     config: AdaptiveConfig,
     // TODO: Handle it somehow
-    uncommitted_docs: Arc<RwLock<AHashMap<String, serde_json::Value>>>,
+    uncommitted_docs: Arc<DashMap<String, serde_json::Value>>,
 }
 
 impl Engine {
@@ -89,7 +89,7 @@ impl Engine {
             field_doc,
             field_expires_at,
             config,
-            uncommitted_docs: Arc::new(RwLock::new(AHashMap::new())),
+            uncommitted_docs: Arc::new(DashMap::new()),
         };
 
         engine.spawn_committer();
@@ -106,10 +106,7 @@ impl Engine {
             .writer
             .write()
             .map_err(|_| anyhow::anyhow!("Lock poisoned"))?;
-        let mut uncommitted = self
-            .uncommitted_docs
-            .write()
-            .map_err(|_| anyhow::anyhow!("Cache Lock poisoned"))?;
+        let uncommitted = self.uncommitted_docs.clone();
 
         let searcher = self.reader.searcher();
 
@@ -281,7 +278,7 @@ impl Engine {
 
     fn spawn_committer(&self) {
         let writer_lock = self.writer.clone();
-        let uncommitted_lock = self.uncommitted_docs.clone();
+        let uncommitted = self.uncommitted_docs.clone();
         let interval_duration = Duration::from_secs(self.config.commit_interval_secs);
 
         tokio::spawn(async move {
@@ -293,10 +290,8 @@ impl Engine {
                     match writer.commit() {
                         Ok(opstamp) => {
                             info!("Commit successful. Opstamp: {}", opstamp);
-                            if let Ok(mut uncommitted) = uncommitted_lock.write() {
-                                uncommitted.clear();
-                                trace!("Uncommitted cache cleared");
-                            }
+                            uncommitted.clear();
+                            trace!("Uncommitted cache cleared");
                         }
                         Err(e) => error!("Commit failed: {}", e),
                     }
