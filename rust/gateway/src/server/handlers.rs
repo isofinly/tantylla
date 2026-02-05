@@ -15,6 +15,6 @@ pub async fn search_handler(
 ) -> impl IntoResponse {
     match scatter_gather(state, payload).await {
         Ok(response) => (StatusCode::OK, Json(response)).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(e)).into_response(),
     }
 }

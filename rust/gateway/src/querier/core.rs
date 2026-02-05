@@ -1,10 +1,29 @@
 use crate::server::core::AppState;
 use futures::future::join_all;
-use std::sync::Arc;
+use serde::{Deserialize, Serialize};
+use std::{error::Error, sync::Arc};
 use tantylla_common::indexer::{
     SearchHit, SearchRequest, SearchResponse, search_request::Consistency,
 };
 use tonic::Request;
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct ScatterFail {
+    message: String,
+    errors: Vec<String>,
+}
+
+impl std::fmt::Display for ScatterFail {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.errors.is_empty() {
+            write!(f, "{}", self.message)
+        } else {
+            write!(f, "{}: {}", self.message, self.errors.join("; "))
+        }
+    }
+}
+
+impl Error for ScatterFail {}
 
 /// Broadcasts the query to all connected nodes and aggregates results.
 ///
@@ -14,7 +33,7 @@ use tonic::Request;
 pub async fn scatter_gather(
     state: Arc<AppState>,
     req: SearchRequest,
-) -> Result<SearchResponse, String> {
+) -> Result<SearchResponse, ScatterFail> {
     let clients = &state.clients;
     let consistency = req.consistency();
     let total_nodes = clients.len();
@@ -54,7 +73,9 @@ pub async fn scatter_gather(
                 successful_nodes += 1;
             }
             Err(e) => {
-                let error_msg = format!("Node {} search failed: {}", idx, e);
+                let code = e.code();
+                let msg = e.message();
+                let error_msg = format!("Node {} search failed: {} ({:?})", idx, code, msg);
                 tracing::error!("{}", error_msg);
                 failed_nodes.push(error_msg);
             }
@@ -66,22 +87,26 @@ pub async fn scatter_gather(
             // ALL consistency: every node must succeed
             if successful_nodes < total_nodes {
                 let error_msg = format!(
-                    "Consistency ALL failed: {}/{} nodes succeeded. Errors: {:?}",
-                    successful_nodes, total_nodes, failed_nodes
+                    "Consistency ALL failed: {}/{} nodes succeeded",
+                    successful_nodes, total_nodes,
                 );
                 tracing::error!("{}", error_msg);
-                return Err(error_msg);
+                return Err(ScatterFail {
+                    message: error_msg,
+                    errors: failed_nodes,
+                });
             }
         }
         _ => {
             // ANY or UNSPECIFIED (default): at least one node must succeed
             if successful_nodes == 0 {
-                let error_msg = format!(
-                    "Consistency ANY failed: all {} nodes failed. Errors: {:?}",
-                    total_nodes, failed_nodes
-                );
+                let error_msg =
+                    format!("Consistency ANY failed: all {} nodes failed.", total_nodes);
                 tracing::error!("{}", error_msg);
-                return Err(error_msg);
+                return Err(ScatterFail {
+                    message: error_msg,
+                    errors: failed_nodes,
+                });
             }
         }
     }
