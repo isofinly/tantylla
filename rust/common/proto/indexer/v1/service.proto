@@ -48,7 +48,7 @@ message IndexOperation {
   // CRITICAL FOR CORRECTNESS:
   // The Node must compare this against the stored doc's timestamp.
   // If incoming_writetime < stored_writetime, the operation is ignored.
-  int64 writetime = 3;
+  uint64 writetime = 3;
 
   // ScyllaDB 'ttl' (seconds).
   // Used to determine if the document should be deleted after a certain time.

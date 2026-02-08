@@ -164,9 +164,9 @@ impl Engine {
                     merge_json(&mut current_doc_json, patch_json);
 
                     let expires_at = if let Some(ttl) = op.cdc_ttl {
-                        op.writetime + (ttl * 1_000_000)
+                        op.writetime + (ttl * 1_000_000) as u64
                     } else {
-                        i64::MAX
+                        u64::MAX
                     };
 
                     uncommitted.insert(op.id.clone(), current_doc_json.clone());

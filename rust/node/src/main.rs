@@ -16,7 +16,7 @@ struct Args {
     port: u16,
     #[arg(long, default_value = "[::1]")]
     address: String,
-    
+
     /// Commit interval in seconds (documents become visible after this time)
     #[arg(long, default_value = "5")]
     commit_interval_secs: u64,

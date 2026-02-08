@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 
+use crate::checkpointer::core::Checkpointer;
 use ahash::AHashMap;
-use futures::executor::block_on;
 use serde::{Deserialize, Serialize};
 use tantylla_common::indexer::{
     IndexBatchRequest, IndexBatchResponse, IndexOperation, index_service_client::IndexServiceClient,
@@ -25,7 +25,7 @@ pub(crate) struct BatchItem {
     pub target_node: String,
     pub id: String,
     pub op_type: i32,
-    pub writetime: i64,
+    pub writetime: u64,
     pub cdc_ttl: Option<i64>,
     pub payload_json: String,
 }
@@ -49,25 +49,6 @@ impl Service {
             buffer: Arc::new(Mutex::new(Vec::new())),
             max_retry_attempts: DEFAULT_MAX_RETRY_ATTEMPTS,
             retry_backoff_ms: DEFAULT_RETRY_BACKOFF_MS,
-            last_flush_failed: Arc::new(Mutex::new(false)),
-        };
-        svc.start_ticker();
-        svc
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn with_params(
-        flush_interval: Duration,
-        batch_limit: usize,
-        max_retry_attempts: u32,
-        retry_backoff_ms: u64,
-    ) -> Self {
-        let svc = Service {
-            flush_interval,
-            batch_limit,
-            buffer: Arc::new(Mutex::new(Vec::new())),
-            max_retry_attempts,
-            retry_backoff_ms,
             last_flush_failed: Arc::new(Mutex::new(false)),
         };
         svc.start_ticker();
@@ -124,7 +105,7 @@ impl Service {
 
         if should_flush {
             // TODO: Does it use existing runtime and context?
-            block_on(self.flush())?;
+            futures::executor::block_on(self.flush())?;
         }
 
         Ok(())
@@ -173,7 +154,7 @@ impl Service {
 
         for (target_node, operations) in node_batches {
             let expected_count = operations.len() as u32;
-            let result = self.send_batch_with_retry(&target_node, operations).await;
+            let result = self.send_batch_with_retry(&target_node, &operations).await;
 
             match result {
                 Ok(response) => {
@@ -198,6 +179,23 @@ impl Service {
                             response.skipped_count,
                             response.success
                         );
+                        let writetime_batch_max = &operations
+                            .iter()
+                            .max_by(|a, b| a.writetime.cmp(&b.writetime))
+                            .map(|x| x.writetime);
+                        if let Some(writetime) = writetime_batch_max {
+                            let writetime_micro = std::time::Duration::from_micros(*writetime);
+                            let is_committed =
+                                Checkpointer::commit_last_read_offset(writetime_micro);
+                            match is_committed {
+                                Ok(_) => info!("Batch writetime committed successfully"),
+                                // TODO: Something went wrong with committing the writetime. Not sure what to do.
+                                Err(e) => error!("Error committing batch: {}", e),
+                            }
+                        } else {
+                            // TODO: We are in uncertain state. Not sure what to do.
+                            error!("Failed to find max writetime for batch");
+                        }
                     }
                 }
                 Err(e) => {
@@ -226,7 +224,7 @@ impl Service {
     async fn send_batch_with_retry(
         &self,
         target_node: &str,
-        operations: Vec<IndexOperation>,
+        operations: &Vec<IndexOperation>,
     ) -> Result<IndexBatchResponse, BatchSendError> {
         let address = if !target_node.starts_with("http") {
             format!("http://{}", target_node)

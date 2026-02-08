@@ -23,36 +23,18 @@ pub(crate) struct Router {
 impl Router {
     pub async fn new(
         node_info: AHashMap<usize, String>,
-        keyspace: String,
-        table: String,
+        keyspace: &String,
+        table: &String,
         session: Arc<Session>,
+        batch_service: Service,
     ) -> Result<Self> {
         let pk_columns =
             utils::get_partition_key_columns(session.clone(), &keyspace, &table).await?;
 
         Ok(Router {
             node_info,
-            batch_service: Service::default(),
+            batch_service,
             pk_columns,
-        })
-    }
-
-    #[allow(dead_code)]
-    pub async fn with_ticker_and_limit(
-        flush_interval: tokio::time::Duration,
-        batch_limit: usize,
-        node_info: AHashMap<usize, String>,
-        session: Arc<Session>,
-        keyspace: String,
-        table: String,
-    ) -> Result<Self> {
-        let pk_columns =
-            utils::get_partition_key_columns(session.clone(), &keyspace, &table).await?;
-
-        Ok(Router {
-            node_info,
-            pk_columns,
-            batch_service: Service::with_params(flush_interval, batch_limit, 3, 100),
         })
     }
 
