@@ -36,13 +36,13 @@ pub(super) fn serialize_row_to_json(
     Ok(serde_json::to_string(&doc)?)
 }
 
-pub(super) fn extract_writetime_from_timeuuid(time_uuid: Uuid) -> anyhow::Result<i64> {
+pub(super) fn extract_writetime_from_timeuuid(time_uuid: Uuid) -> anyhow::Result<u64> {
     let ts = time_uuid
         .get_timestamp()
         .ok_or_else(|| anyhow::anyhow!("Not a time-based UUID"))?;
 
     let (secs, nanos) = ts.to_unix();
-    let micros = (secs as i64 * 1_000_000) + (nanos as i64 / 1_000);
+    let micros = (secs as u64 * 1_000_000) + (nanos as u64 / 1_000);
 
     Ok(micros)
 }
