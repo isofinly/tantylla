@@ -30,40 +30,24 @@
           protoc-gen-rust-grpc
         ];
 
-        cql_lsp = pkgs.rustPlatform.buildRustPackage rec {
-          pname = "cql_lsp";
-          version = "1.0.3";
+        cqlls = pkgs.rustPlatform.buildRustPackage rec {
+          pname = "cqlls";
+          version = "1.0.0";
 
           src = pkgs.fetchCrate {
             inherit pname version;
-            sha256 = "sha256-ebk9/Ja4a/iioDWEEa86wm3C4EQWd7oaK9MO4jT5aAo=";
+            sha256 = "sha256-O6xU7gaNCZ9163Zk+4SJM7lNq1Dn3BQhILKZos7l3sI=";
           };
 
-          cargoHash = "sha256-ea/t1WN4W1u2esV8K5uovwv3gWY+Y6mXy+2gF7hq5zg=";
+          doCheck = false;
+          cargoHash = "sha256-fcrRCNEMTFatHvVdE9zPukuq84hD6RUkEYInrqtzFeg=";
 
           meta = with pkgs.lib; {
-            description = "CQL (Cassandra Query Language) LSP";
-            homepage = "https://crates.io/crates/cql_lsp";
+            description = "The best Language Server for CQL (Cassandra Query Language)";
+            homepage = "https://crates.io/crates/cqlls";
             license = licenses.mit;
           };
         };
-        # cql_lsp = pkgs.rustPlatform.buildRustPackage {
-        #   pname = "cql_lsp";
-        #   version = "1.0.1-fix-I25";
-
-        #   src = pkgs.fetchurl {
-        #     url = "https://github.com/Akzestia/cqlls/archive/refs/tags/v1.0.1-fix-I25.tar.gz";
-        #     sha256 = "sha256-3JAWdsBfZ4YFwxdJrVQFBTM+8GWNy9HQGmWJDiI9bXU=";
-        #   };
-
-        #   cargoHash = "sha256-s5p4V2UoqwfDmLPXBQcqGGOlQSfUt6QBOHRqnkkmwyk=";
-
-        #   meta = with pkgs.lib; {
-        #     description = "CQL (Cassandra Query Language) LSP";
-        #     homepage = "https://github.com/Akzestia/cqlls";
-        #     license = licenses.mit;
-        #   };
-        # };
       in
       {
         devShells.default = pkgs.mkShell {
@@ -79,13 +63,13 @@
               openssl
               pkg-config
               cassandra
-              cql_lsp
+              cqlls
               cargo-deny
             ]
             ++ protoTools;
 
           env = {
-            OUT_DIR="~/.cargo-target/proto";
+            OUT_DIR = "~/.cargo-target/proto";
           };
 
           shellHook = ''
