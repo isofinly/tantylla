@@ -26,79 +26,25 @@ cargo check
 cargo check --all-targets
 ```
 
-## Test Commands
+## Rust guidelines
 
-```bash
-cargo test
+- When adding dependencies to Rust projects, use `cargo add`.
+- In code that uses `eyre` or `anyhow` `Result`s, consistently use `.context()` prior to every error-propagation with `?`. Context messages in `.context` should be simple present tense, such as to complete the sentence "while attempting to ...".
+- Prefer `expect()` over `unwrap()`. The `expect` message should be very concise, and should explain why that expect call cannot fail.
+- When designing `pub` or crate-wide Rust APIs, consult the checklist in <https://rust-lang.github.io/api-guidelines/checklist.html>.
 
-cargo test -p tantylla-node
-cargo test -p tantylla-ingestor
-cargo test -p tantylla-gateway
-cargo test -p tantylla-common
+### Useful Rust frameworks for testing
 
-cargo test test_name_here
-cargo test -p tantylla-node test_name_here
+- **`quickcheck`**: Property-based testing for when you have an obviously-correct comparison you can test against.
+- **`insta`**: Snapshot testing for regression prevention. Use `cargo insta test` as a stand-in for `cargo test` to run the snapshot tests.
 
-cargo test -- --nocapture
+### Writing compile_fail Tests
 
-cargo test -- --ignored
-```
+Use `compile_fail` doctests to verify when certain code should _not_ compile, such as for type-state patterns or trait-based enforcement. Each `compile_fail` test should target a specific error condition since the doctest only has a binary output of whether it fails to compile, not the many reasons _why_. Make sure you clearly explain exactly WHY the code should fail to compile.
 
-## Lint Commands
+If there is no obvious item to add the doctest to, create a new private item with `#[allow(dead_code)]` that you add the compile-fail tests to. Document that that's its purpose.
 
-```bash
-cargo clippy --all-targets --all-features -- -D warnings
-
-cargo clippy -p tantylla-node -- -D warnings
-
-cargo fmt -- --check
-
-cargo fmt
-
-cargo deny check
-```
-
-### Formatting
-
-- Use `cargo fmt` with default settings
-- Max line length: 100 characters (soft limit)
-- Use 4 spaces for indentation
-- Trailing commas in multi-line structs/enums
-
-### Naming Conventions
-
-- **Types**: PascalCase (`IndexService`, `BatchItem`)
-- **Functions/Variables**: snake_case (`index_batch`, `processed_count`)
-- **Constants**: SCREAMING_SNAKE_CASE (`MAX_BATCH_SIZE`)
-- **Modules**: snake_case (`mod batch_service`)
-- **Generic parameters**: Single uppercase letter (`T`, `K`, `V`)
-- **Acronyms**: Treat as words (`HttpClient`, not `HTTPClient`)
-
-### Types and Error Handling
-
-- Use `anyhow::Result` for application-level errors
-- Use `thiserror` for library error types (if needed)
-- Propagate errors with `?` operator
-- Use `expect()` only for unrecoverable programmer errors
-- Do not `unwrap()`, prefer `?` or proper error handling
-
-Example:
-
-```rust
-use anyhow::{Result, anyhow};
-
-async fn process_data() -> Result<()> {
-    let session = SessionBuilder::new()
-        .known_nodes_addr(&uris)
-        .build()
-        .await?;  // Propagate error
-
-    let value = data.get("key")
-        .ok_or_else(|| anyhow!("Missing required key"))?;
-
-    Ok(())
-}
-```
+Before committing, create a temporary example file for each compile-fail test and check the output of `cargo run --example <name>` to ensure it fails for the correct reason. Remove the temporary example after.
 
 ### Async/Await
 
@@ -140,17 +86,6 @@ crate/
 │   └── batch/           # Data processing
 └── Cargo.toml
 ```
-
-### Key Dependencies
-
-- **Async**: `tokio`, `async-trait`
-- **RPC**: `tonic`, `prost` (gRPC)
-- **Serialization**: `serde`, `serde_json`
-- **CLI**: `clap`
-- **Logging**: `tracing`, `tracing-subscriber`
-- **Search**: `tantivy`
-- **Database**: `scylla`, `scylla-cdc`
-- **Collections**: `ahash` (fast HashMap)
 
 ## CI/Quality Checks
 
