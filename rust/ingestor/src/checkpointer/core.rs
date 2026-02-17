@@ -82,7 +82,7 @@ impl Checkpointer {
         let keyspace = config.keyspace.clone();
         let table = config.table.clone();
 
-        let path_name = format!(".{}-{}", keyspace, table);
+        let path_name = format!("{}-{}.checkpoint", keyspace, table);
         let path = Path::new(&path_name);
         let content = match fs::read_to_string(path) {
             Ok(content) => content,
