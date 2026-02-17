@@ -93,7 +93,7 @@ impl Router {
 
         // Add to batch service - this may trigger backpressure if buffer is full
         // TODO: Maybe implement a retry mechanism to try again?
-        match self.batch_service.add(batch_item_json) {
+        match self.batch_service.add(batch_item_json).await {
             Ok(_) => Ok(()),
             Err(e) => Err(anyhow::anyhow!("Failed to add batch item: {}", e)),
         }

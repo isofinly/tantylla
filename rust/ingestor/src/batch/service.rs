@@ -88,7 +88,7 @@ impl Service {
 
     /// Adds an item to the buffer.
     /// If backpressure is active, returns an error to stop CDC ingestion.
-    pub(crate) fn add(&self, item: String) -> Result<(), BatchFlushError> {
+    pub(crate) async fn add(&self, item: String) -> Result<(), BatchFlushError> {
         if self.is_backpressure_active() {
             return Err(BatchFlushError {
                 // TODO: Not enough context info to determine failed nodes
@@ -104,8 +104,7 @@ impl Service {
         };
 
         if should_flush {
-            // TODO: Does it use existing runtime and context?
-            futures::executor::block_on(self.flush())?;
+            self.flush().await?;
         }
 
         Ok(())
