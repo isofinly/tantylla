@@ -5,6 +5,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use dashmap::DashMap;
+use serde::{Deserialize, Serialize};
 use tantivy::collector::{Count, TopDocs};
 use tantivy::query::{BooleanQuery, Occur, QueryParser, RangeQuery};
 use tantivy::schema::{
@@ -14,7 +15,7 @@ use tantivy::schema::{
 use tantivy::{Document, Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument, Term};
 use tantylla_common::indexer::index_operation::OpType;
 use tantylla_common::indexer::{IndexBatchResponse, IndexOperation, SearchHit, SearchResponse};
-use tracing::{error, info, trace};
+use tracing::{error, info, trace, warn};
 
 const WRITER_BUFFER_SIZE: usize = 50_000_000; // 50MB buffer
 const PRUNE_INTERVAL: Duration = Duration::from_secs(50);
@@ -35,6 +36,14 @@ impl Default for AdaptiveConfig {
     }
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+struct Doc {
+    id: String,
+    doc: serde_json::Value,
+    expires_at: u64,
+    writetime: u64,
+}
+
 #[derive(Clone)]
 pub(crate) struct Engine {
     index: Index,
@@ -47,7 +56,8 @@ pub(crate) struct Engine {
     field_expires_at: Field,
     config: AdaptiveConfig,
     // TODO: Handle it somehow
-    uncommitted_docs: Arc<DashMap<String, serde_json::Value>>,
+    /// Map from `String` (_The unique Primary Key of the row_) to the `UncommittedDoc`
+    uncommitted_docs: Arc<DashMap<String, Doc>>,
 }
 
 impl Engine {
@@ -58,6 +68,8 @@ impl Engine {
         let mut schema_builder = Schema::builder();
         let field_id = schema_builder.add_text_field("id", STRING | STORED);
         let field_expires_at = schema_builder.add_i64_field("expires_at", FAST | STORED);
+        // No need to interact with writetime field. We can safely ignore its handle.
+        let _ = schema_builder.add_i64_field("writetime", FAST | STORED);
         let json_options = JsonObjectOptions::default()
             .set_stored()
             .set_indexing_options(
@@ -108,8 +120,6 @@ impl Engine {
             .map_err(|_| anyhow::anyhow!("Lock poisoned"))?;
         let uncommitted = self.uncommitted_docs.clone();
 
-        let searcher = self.reader.searcher();
-
         let mut processed = 0;
         let mut skipped = 0;
 
@@ -118,48 +128,20 @@ impl Engine {
 
             match op_type {
                 OpType::Upsert => {
-                    let term = Term::from_field_text(self.field_id, &op.id);
+                    let existing = self.find_cached_or_indexed(&op.id);
+                    if let Some(writetime) = existing.as_ref().map(|d| d.writetime) {
+                        if writetime >= op.writetime {
+                            warn!("Upsert operation skipped due to newer write time");
+                            skipped += 1;
+                            continue;
+                        }
+                    }
+                    let mut current_doc_json = existing
+                        .map(|d| d.doc)
+                        .unwrap_or_else(|| serde_json::json!({}));
 
                     let patch_json: serde_json::Value =
                         serde_json::from_str(&op.payload_json).unwrap_or(serde_json::Value::Null);
-
-                    let mut current_doc_json = if let Some(cached_doc) = uncommitted.get(&op.id) {
-                        cached_doc.clone()
-                    } else {
-                        // TODO: This is a synchronous search per item.
-                        let term_query =
-                            tantivy::query::TermQuery::new(term.clone(), IndexRecordOption::Basic);
-                        let top_docs = searcher
-                            .search(&term_query, &TopDocs::with_limit(1))
-                            .unwrap_or_default();
-
-                        if let Some((_, doc_addr)) = top_docs.first() {
-                            let retrieved: TantivyDocument =
-                                searcher.doc(*doc_addr).unwrap_or_default();
-
-                            let doc_str = retrieved.to_json(&self.schema);
-
-                            if let Ok(mut full_doc_val) =
-                                serde_json::from_str::<serde_json::Value>(&doc_str)
-                            {
-                                match full_doc_val.get_mut("document") {
-                                    Some(serde_json::Value::Array(arr)) => {
-                                        if !arr.is_empty() {
-                                            std::mem::take(&mut arr[0])
-                                        } else {
-                                            serde_json::json!({})
-                                        }
-                                    }
-                                    Some(other) => other.clone(),
-                                    None => serde_json::json!({}),
-                                }
-                            } else {
-                                serde_json::json!({})
-                            }
-                        } else {
-                            serde_json::json!({})
-                        }
-                    };
 
                     merge_json(&mut current_doc_json, patch_json);
 
@@ -169,14 +151,23 @@ impl Engine {
                         u64::MAX
                     };
 
-                    uncommitted.insert(op.id.clone(), current_doc_json.clone());
+                    let uncommitted_doc = Doc {
+                        id: op.id.clone(),
+                        doc: current_doc_json.clone(),
+                        writetime: op.writetime,
+                        expires_at,
+                    };
+
+                    uncommitted.insert(op.id.clone(), uncommitted_doc);
 
                     let full_doc_wrapper = serde_json::json!({
                         "id": op.id,
                         "expires_at": expires_at,
-                        "document": current_doc_json
+                        "document": current_doc_json,
+                        "writetime": op.writetime,
                     });
 
+                    let term = Term::from_field_text(self.field_id, &op.id);
                     writer.delete_term(term);
 
                     match TantivyDocument::parse_json(&self.schema, &full_doc_wrapper.to_string()) {
@@ -191,6 +182,14 @@ impl Engine {
                     };
                 }
                 OpType::Delete => {
+                    let existing = self.find_cached_or_indexed(&op.id);
+                    if let Some(writetime) = existing.as_ref().map(|d| d.writetime) {
+                        if writetime >= op.writetime {
+                            warn!("Upsert operation skipped due to newer write time");
+                            skipped += 1;
+                            continue;
+                        }
+                    }
                     let term = Term::from_field_text(self.field_id, &op.id);
                     writer.delete_term(term);
                     uncommitted.remove(&op.id);
@@ -327,6 +326,61 @@ impl Engine {
                 }
             }
         });
+    }
+
+    fn find_cached_or_indexed(&self, id: &str) -> Option<Doc> {
+        let searcher = self.reader.searcher();
+
+        // 1. Check the uncommitted cache first
+        if let Some(cached_doc) = self.uncommitted_docs.get(id) {
+            return Some(cached_doc.clone());
+        }
+
+        // 2. If not in cache, search the Tantivy index
+        let term = Term::from_field_text(self.field_id, id);
+        let term_query = tantivy::query::TermQuery::new(term, IndexRecordOption::Basic);
+
+        let top_docs = searcher
+            .search(&term_query, &TopDocs::with_limit(1))
+            .unwrap_or_default();
+
+        if let Some((_, doc_addr)) = top_docs.first() {
+            let retrieved: TantivyDocument = searcher.doc(*doc_addr).unwrap_or_default();
+            let doc_str = retrieved.to_json(&self.schema);
+
+            if let Ok(mut full_doc_val) = serde_json::from_str::<serde_json::Value>(&doc_str) {
+                let writetime = full_doc_val
+                    .get("writetime")
+                    .and_then(|v| v.as_array())
+                    .and_then(|a| a.first())
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+
+                let expires_at = full_doc_val
+                    .get("expires_at")
+                    .and_then(|v| v.as_array())
+                    .and_then(|a| a.first())
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(u64::MAX);
+
+                let doc_body = match full_doc_val.get_mut("document") {
+                    Some(serde_json::Value::Array(arr)) if !arr.is_empty() => {
+                        std::mem::take(&mut arr[0])
+                    }
+                    Some(other) => other.clone(),
+                    None => serde_json::json!({}),
+                };
+
+                return Some(Doc {
+                    id: id.to_string(),
+                    doc: doc_body,
+                    writetime,
+                    expires_at,
+                });
+            }
+        }
+
+        None
     }
 }
 
