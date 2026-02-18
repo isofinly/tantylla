@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use tracing::Level;
 use tracing_appender::non_blocking::WorkerGuard;
-use tracing_subscriber::{EnvFilter, fmt, prelude::*};
+use tracing_subscriber::{EnvFilter, Layer, Registry, fmt, prelude::*};
 
 /// Configuration options for the logger
 #[derive(Clone, Debug)]
@@ -35,6 +35,14 @@ pub fn init_logger(log_level: Level) {
 
 /// Initialize the logger with custom configuration
 pub fn init_logger_with_config(config: LoggerConfig) -> Option<WorkerGuard> {
+    init_logger_with_config_and_layer(config, None)
+}
+
+/// Initialize the logger with custom configuration and an optional layer
+pub fn init_logger_with_config_and_layer(
+    config: LoggerConfig,
+    extra_layer: Option<Box<dyn Layer<Registry> + Send + Sync>>,
+) -> Option<WorkerGuard> {
     let stdout_filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&config.level));
 
@@ -66,6 +74,7 @@ pub fn init_logger_with_config(config: LoggerConfig) -> Option<WorkerGuard> {
     };
 
     tracing_subscriber::registry()
+        .with(extra_layer)
         .with(stdout_layer)
         .with(file_layer)
         .init();

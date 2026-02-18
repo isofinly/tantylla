@@ -18,6 +18,8 @@ pub(crate) struct Service {
     retry_backoff_ms: u64,
     /// Flag responsible for triggering backpressure
     last_flush_failed: Arc<Mutex<bool>>,
+    // TODO: Change when multi-table and multi-keyspace feature will be implemented
+    table_name: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -37,12 +39,12 @@ const DEFAULT_RETRY_BACKOFF_MS: u64 = 100;
 
 impl Default for Service {
     fn default() -> Self {
-        Self::new()
+        Self::new("unknown".to_string())
     }
 }
 
 impl Service {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(table_name: String) -> Self {
         let svc = Self {
             flush_interval: DEFAULT_FLUSH_INTERVAL,
             batch_limit: DEFAULT_BATCH_LIMIT,
@@ -50,6 +52,7 @@ impl Service {
             max_retry_attempts: DEFAULT_MAX_RETRY_ATTEMPTS,
             retry_backoff_ms: DEFAULT_RETRY_BACKOFF_MS,
             last_flush_failed: Arc::new(Mutex::new(false)),
+            table_name,
         };
         svc.start_ticker();
         svc
@@ -124,6 +127,14 @@ impl Service {
 
         info!("Flushing batch of {} items", items_to_process.len());
 
+        tracing::info!(
+            target: "test_event",
+            source = "ingestor",
+            event = "batch_flush_start",
+            table = self.table_name,
+            item_count = items_to_process.len()
+        );
+
         let mut node_batches: AHashMap<String, Vec<IndexOperation>> = AHashMap::new();
 
         for item in items_to_process {
@@ -178,6 +189,16 @@ impl Service {
                             response.skipped_count,
                             response.success
                         );
+                        tracing::info!(
+                            target: "test_event",
+                            source = "ingestor",
+                            event = "batch_flush_node_success",
+                            table = self.table_name,
+                            target_node,
+                            processed_count = response.processed_count,
+                            skipped_count = response.skipped_count,
+                            success = response.success
+                        );
                         let writetime_batch_max = &operations
                             .iter()
                             .max_by(|a, b| a.writetime.cmp(&b.writetime))
@@ -202,6 +223,14 @@ impl Service {
                         "Node {}: Failed to index batch after all retries: {}",
                         target_node, e
                     );
+                    tracing::info!(
+                        target: "test_event",
+                        source = "ingestor",
+                        event = "batch_flush_node_failure",
+                        table = self.table_name,
+                        target_node,
+                        error = e.to_string()
+                    );
                     failed_nodes.push(target_node);
                 }
             }
@@ -209,11 +238,25 @@ impl Service {
 
         if !failed_nodes.is_empty() {
             let failed_count = failed_nodes.len();
+            tracing::info!(
+                target: "test_event",
+                source = "ingestor",
+                event = "batch_flush_failed",
+                table = self.table_name,
+                failed_nodes = ?failed_nodes
+            );
             return Err(BatchFlushError {
                 failed_nodes,
                 message: format!("Failed to flush batches to {} nodes", failed_count),
             });
         }
+
+        tracing::info!(
+            target: "test_event",
+            source = "ingestor",
+            event = "batch_flush_success",
+            table = self.table_name
+        );
 
         Ok(())
     }
@@ -223,7 +266,7 @@ impl Service {
     async fn send_batch_with_retry(
         &self,
         target_node: &str,
-        operations: &Vec<IndexOperation>,
+        operations: &[IndexOperation],
     ) -> Result<IndexBatchResponse, BatchSendError> {
         let address = if !target_node.starts_with("http") {
             format!("http://{}", target_node)
@@ -235,7 +278,7 @@ impl Service {
         let mut last_error: Option<String> = None;
 
         for attempt in 0..self.max_retry_attempts {
-            match self.try_send_batch(&address, &operations).await {
+            match self.try_send_batch(&address, operations).await {
                 Ok(response) => {
                     let total_processed = response.processed_count + response.skipped_count;
                     if total_processed == expected_count {

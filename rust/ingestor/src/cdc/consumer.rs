@@ -11,6 +11,12 @@ pub(crate) struct Consumer {
 #[async_trait]
 impl scylla_cdc::consumer::Consumer for Consumer {
     async fn consume_cdc(&mut self, data: CDCRow<'_>) -> anyhow::Result<()> {
+        tracing::info!(
+            target: "test_event",
+            source = "ingestor",
+            event = "cdc_row_received",
+            operation = format!("{:?}", data.operation)
+        );
         match self.router.route(&data).await {
             Ok(_) => Ok(()),
             Err(e) => {

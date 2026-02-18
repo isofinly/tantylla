@@ -42,7 +42,7 @@ pub(super) fn extract_writetime_from_timeuuid(time_uuid: Uuid) -> anyhow::Result
         .ok_or_else(|| anyhow::anyhow!("Not a time-based UUID"))?;
 
     let (secs, nanos) = ts.to_unix();
-    let micros = (secs as u64 * 1_000_000) + (nanos as u64 / 1_000);
+    let micros = (secs * 1_000_000) + (nanos as u64 / 1_000);
 
     Ok(micros)
 }

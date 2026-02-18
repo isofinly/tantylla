@@ -1,7 +1,9 @@
+use anyhow::Context;
 use clap::Parser;
 use std::sync::Arc;
 use tantylla_common::indexer::index_service_client::IndexServiceClient;
 use tantylla_common::logger;
+use tantylla_common::test_tracing::TestEventLayer;
 use tonic::transport::{Channel, Endpoint};
 
 mod querier;
@@ -24,17 +26,38 @@ struct Args {
         required = true
     )]
     search_nodes: Vec<String>,
+
+    #[cfg(debug_assertions)]
+    #[arg(long, help = "UDP port for debug test events")]
+    test_event_port: Option<u16>,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
-    logger::init_logger_with_config(logger::LoggerConfig {
-        level: "debug".to_string(),
-        file_path: None,
-        file_level: "info".to_string(),
-    });
+    #[cfg(debug_assertions)]
+    let test_event_port = args.test_event_port;
+    #[cfg(not(debug_assertions))]
+    let test_event_port: Option<u16> = None;
+
+    let test_layer = if let Some(port) = test_event_port {
+        Some(
+            Box::new(TestEventLayer::connect(port).context("connecting test event layer")?)
+                as Box<_>,
+        )
+    } else {
+        None
+    };
+
+    logger::init_logger_with_config_and_layer(
+        logger::LoggerConfig {
+            level: "debug".to_string(),
+            file_path: None,
+            file_level: "info".to_string(),
+        },
+        test_layer,
+    );
 
     tracing::info!("Initializing Gateway...");
 
@@ -55,6 +78,8 @@ async fn main() -> anyhow::Result<()> {
         let client = IndexServiceClient::new(channel);
         clients.push(client);
     }
+
+    tracing::info!(target: "test_event", source = "gateway", event = "startup", port = args.port);
 
     let state = Arc::new(AppState { clients });
 

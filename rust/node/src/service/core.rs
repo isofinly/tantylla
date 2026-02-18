@@ -1,11 +1,8 @@
 use crate::engine::core::{AdaptiveConfig, Engine};
 use anyhow::Result;
-use tantylla_common::{
-    self,
-    indexer::{
-        HealthCheckRequest, HealthCheckResponse, IndexBatchRequest, IndexBatchResponse,
-        SearchRequest, SearchResponse, index_service_server::IndexService,
-    },
+use tantylla_common::indexer::{
+    HealthCheckRequest, HealthCheckResponse, IndexBatchRequest, IndexBatchResponse, SearchRequest,
+    SearchResponse, index_service_server::IndexService,
 };
 use tonic::{Request, Response, Status};
 use tracing::debug;
@@ -30,9 +27,36 @@ impl IndexService for IndexServiceService {
     ) -> Result<Response<IndexBatchResponse>, Status> {
         debug!("Indexing batch with {:?}", request);
         let req = request.into_inner();
+        let operation_count = req.operations.len();
+
+        tracing::info!(
+            target: "test_event",
+            source = "node",
+            event = "index_batch_request",
+            operation_count
+        );
+
         match self.engine.process_batch(req.operations) {
-            Ok(response) => Ok(Response::new(response)),
-            Err(err) => Err(Status::internal(err.to_string())),
+            Ok(response) => {
+                tracing::info!(
+                    target: "test_event",
+                    source = "node",
+                    event = "index_batch_response",
+                    processed_count = response.processed_count,
+                    skipped_count = response.skipped_count,
+                    success = response.success
+                );
+                Ok(Response::new(response))
+            }
+            Err(err) => {
+                tracing::info!(
+                    target: "test_event",
+                    source = "node",
+                    event = "index_batch_failure",
+                    error = err.to_string()
+                );
+                Err(Status::internal(err.to_string()))
+            }
         }
     }
 
@@ -42,12 +66,42 @@ impl IndexService for IndexServiceService {
     ) -> Result<Response<SearchResponse>, Status> {
         debug!("Searching {:?}", request);
         let req = request.into_inner();
+        let query = req.query.clone();
+        let limit = req.limit;
+        let offset = req.offset;
+
+        tracing::info!(
+            target: "test_event",
+            source = "node",
+            event = "search_request",
+            query,
+            limit,
+            offset
+        );
+
         match self
             .engine
             .search(&req.query, req.limit as usize, req.offset as usize)
         {
-            Ok(response) => Ok(Response::new(response)),
-            Err(err) => Err(Status::internal(err.to_string())),
+            Ok(response) => {
+                tracing::info!(
+                    target: "test_event",
+                    source = "node",
+                    event = "search_response",
+                    total_hits = response.total_hits,
+                    duration_ms = response.duration_ms
+                );
+                Ok(Response::new(response))
+            }
+            Err(err) => {
+                tracing::info!(
+                    target: "test_event",
+                    source = "node",
+                    event = "search_failure",
+                    error = err.to_string()
+                );
+                Err(Status::internal(err.to_string()))
+            }
         }
     }
 

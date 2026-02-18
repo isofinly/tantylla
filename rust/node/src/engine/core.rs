@@ -40,7 +40,7 @@ impl Default for AdaptiveConfig {
 struct Doc {
     id: String,
     doc: serde_json::Value,
-    expires_at: u64,
+    expires_at: i64,
     writetime: u64,
 }
 
@@ -129,12 +129,12 @@ impl Engine {
             match op_type {
                 OpType::Upsert => {
                     let existing = self.find_cached_or_indexed(&op.id);
-                    if let Some(writetime) = existing.as_ref().map(|d| d.writetime) {
-                        if writetime >= op.writetime {
-                            warn!("Upsert operation skipped due to newer write time");
-                            skipped += 1;
-                            continue;
-                        }
+                    if let Some(writetime) = existing.as_ref().map(|d| d.writetime)
+                        && writetime >= op.writetime
+                    {
+                        warn!("Upsert operation skipped due to newer write time");
+                        skipped += 1;
+                        continue;
                     }
                     let mut current_doc_json = existing
                         .map(|d| d.doc)
@@ -146,9 +146,11 @@ impl Engine {
                     merge_json(&mut current_doc_json, patch_json);
 
                     let expires_at = if let Some(ttl) = op.cdc_ttl {
-                        op.writetime + (ttl * 1_000_000) as u64
+                        let ttl_micros = ttl.saturating_mul(1_000_000).max(0) as u64;
+                        let expires_at = op.writetime.saturating_add(ttl_micros);
+                        i64::try_from(expires_at).unwrap_or(i64::MAX)
                     } else {
-                        u64::MAX
+                        i64::MAX
                     };
 
                     let uncommitted_doc = Doc {
@@ -183,12 +185,12 @@ impl Engine {
                 }
                 OpType::Delete => {
                     let existing = self.find_cached_or_indexed(&op.id);
-                    if let Some(writetime) = existing.as_ref().map(|d| d.writetime) {
-                        if writetime >= op.writetime {
-                            warn!("Upsert operation skipped due to newer write time");
-                            skipped += 1;
-                            continue;
-                        }
+                    if let Some(writetime) = existing.as_ref().map(|d| d.writetime)
+                        && writetime >= op.writetime
+                    {
+                        warn!("Upsert operation skipped due to newer write time");
+                        skipped += 1;
+                        continue;
                     }
                     let term = Term::from_field_text(self.field_id, &op.id);
                     writer.delete_term(term);
@@ -360,8 +362,8 @@ impl Engine {
                     .get("expires_at")
                     .and_then(|v| v.as_array())
                     .and_then(|a| a.first())
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(u64::MAX);
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(i64::MAX);
 
                 let doc_body = match full_doc_val.get_mut("document") {
                     Some(serde_json::Value::Array(arr)) if !arr.is_empty() => {
