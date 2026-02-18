@@ -5,7 +5,10 @@ use anyhow::Result;
 use scylla::client::session::Session;
 use scylla_cdc::consumer::OperationType;
 
-use tantylla_common::indexer::index_operation::OpType;
+use tantylla_common::{
+    indexer::index_operation::OpType,
+    tracing::events::{TestEvent, TestEventSource},
+};
 use tracing::debug;
 
 use crate::{
@@ -76,8 +79,8 @@ impl Router {
 
         tracing::info!(
             target: "test_event",
-            source = "ingestor",
-            event = "cdc_row_routed",
+            source = %TestEventSource::Ingestor,
+            event = %TestEvent::CdcRowRouted,
             table = self.table_name,
             id,
             op = format!("{:?}", op_type),
@@ -111,8 +114,8 @@ impl Router {
             Err(e) => {
                 tracing::info!(
                     target: "test_event",
-                    source = "ingestor",
-                    event = "batch_enqueue_failed",
+                    source = %TestEventSource::Ingestor,
+                    event = %TestEvent::BatchEnqueueFailed,
                     table = self.table_name,
                     id,
                     target_node,

@@ -3,7 +3,8 @@ use clap::Parser;
 use std::sync::Arc;
 use tantylla_common::indexer::index_service_client::IndexServiceClient;
 use tantylla_common::logger;
-use tantylla_common::test_tracing::TestEventLayer;
+use tantylla_common::tracing::events::{TestEvent, TestEventSource};
+use tantylla_common::tracing::layer::TestEventLayer;
 use tonic::transport::{Channel, Endpoint};
 
 mod querier;
@@ -79,7 +80,7 @@ async fn main() -> anyhow::Result<()> {
         clients.push(client);
     }
 
-    tracing::info!(target: "test_event", source = "gateway", event = "startup", port = args.port);
+    tracing::info!(target: "test_event", source = %TestEventSource::Gateway, event = %TestEvent::Startup, port = args.port);
 
     let state = Arc::new(AppState { clients });
 

@@ -2,6 +2,7 @@ use crate::cluster::TestCluster;
 use crate::trace::TraceSequence;
 use anyhow::{Context, Result, ensure};
 use serde_json::Value;
+use tantylla_common::tracing::events::{TestEvent, TestEventSource};
 use tokio::time::{Duration, sleep};
 use uuid::Uuid;
 
@@ -24,11 +25,13 @@ async fn e2e_cdc_to_gateway_search() -> Result<()> {
             .context("fetching trace collector")?;
 
         let startup_sequence = TraceSequence::new()
-            .event_from_source("ingestor", "startup")
-            .event_from_source("node", "startup");
+            .event_from_source(TestEventSource::Node, TestEvent::Startup)
+            .event_from_source(TestEventSource::Gateway, TestEvent::Startup)
+            .event_from_source(TestEventSource::Ingestor, TestEvent::Startup);
         trace_collector
-            .wait_for_sequence(&startup_sequence, 20)
-            .await?;
+            .wait_for_sequence(&startup_sequence, 2)
+            .await
+            .context("waiting for startup sequence")?;
 
         let doc_id = format!("doc-{}", Uuid::new_v4());
         let title = "hello";
@@ -68,9 +71,9 @@ async fn e2e_cdc_to_gateway_search() -> Result<()> {
         tracing::info!(cdc_op_code = ?cdc_op_code, "Observed CDC operation code");
 
         let ingestion_sequence = TraceSequence::new()
-            .event("cdc_row_received")
-            .event("cdc_row_routed")
-            .event("index_batch_response");
+            .event(TestEvent::CdcRowReceived)
+            .event(TestEvent::CdcRowRouted)
+            .event(TestEvent::IndexBatchResponse);
         let matched_events = trace_collector
             .wait_for_sequence(&ingestion_sequence, 20)
             .await?;
@@ -252,7 +255,7 @@ async fn e2e_gateway_failure_on_missing_node() -> Result<()> {
             payload
         );
 
-        let failure_sequence = TraceSequence::new().event("search_failure");
+        let failure_sequence = TraceSequence::new().event(TestEvent::SearchFailure);
         trace_collector
             .wait_for_sequence(&failure_sequence, 20)
             .await?;

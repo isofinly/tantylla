@@ -3,8 +3,12 @@ use std::sync::{Arc, Mutex};
 use crate::checkpointer::core::Checkpointer;
 use ahash::AHashMap;
 use serde::{Deserialize, Serialize};
-use tantylla_common::indexer::{
-    IndexBatchRequest, IndexBatchResponse, IndexOperation, index_service_client::IndexServiceClient,
+use tantylla_common::{
+    indexer::{
+        IndexBatchRequest, IndexBatchResponse, IndexOperation,
+        index_service_client::IndexServiceClient,
+    },
+    tracing::events::{TestEvent, TestEventSource},
 };
 use tokio::time::{self, Duration};
 use tracing::{error, info, warn};
@@ -129,8 +133,8 @@ impl Service {
 
         tracing::info!(
             target: "test_event",
-            source = "ingestor",
-            event = "batch_flush_start",
+            source = %TestEventSource::Ingestor,
+            event = %TestEvent::BatchFlushStart,
             table = self.table_name,
             item_count = items_to_process.len()
         );
@@ -191,8 +195,8 @@ impl Service {
                         );
                         tracing::info!(
                             target: "test_event",
-                            source = "ingestor",
-                            event = "batch_flush_node_success",
+                            source = %TestEventSource::Ingestor,
+                            event = %TestEvent::BatchFlushNodeSuccess,
                             table = self.table_name,
                             target_node,
                             processed_count = response.processed_count,
@@ -225,8 +229,8 @@ impl Service {
                     );
                     tracing::info!(
                         target: "test_event",
-                        source = "ingestor",
-                        event = "batch_flush_node_failure",
+                        source = %TestEventSource::Ingestor,
+                        event = %TestEvent::BatchFlushNodeFailure,
                         table = self.table_name,
                         target_node,
                         error = e.to_string()
@@ -240,8 +244,8 @@ impl Service {
             let failed_count = failed_nodes.len();
             tracing::info!(
                 target: "test_event",
-                source = "ingestor",
-                event = "batch_flush_failed",
+                source = %TestEventSource::Ingestor,
+                event = %TestEvent::BatchFlushFailed,
                 table = self.table_name,
                 failed_nodes = ?failed_nodes
             );
@@ -253,8 +257,8 @@ impl Service {
 
         tracing::info!(
             target: "test_event",
-            source = "ingestor",
-            event = "batch_flush_success",
+            source = %TestEventSource::Ingestor,
+            event = %TestEvent::BatchFlushSuccess,
             table = self.table_name
         );
 

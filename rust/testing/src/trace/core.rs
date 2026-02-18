@@ -1,6 +1,7 @@
 use anyhow::Context;
 use serde_json::Value;
 use std::sync::Arc;
+use tantylla_common::tracing::events::{TestEvent, TestEventSource};
 use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
 use tokio::time::{Duration, timeout};
@@ -11,7 +12,7 @@ use tokio::time::{Duration, timeout};
 
 #[derive(Clone, Debug)]
 pub struct TraceEvent {
-    pub source: String,
+    pub source: TestEventSource,
     pub payload: Value,
 }
 
@@ -27,8 +28,8 @@ pub struct TraceSequence {
 
 #[derive(Clone, Debug)]
 pub struct TraceSequenceStep {
-    source: Option<String>,
-    event: String,
+    source: Option<TestEventSource>,
+    event: TestEvent,
 }
 
 impl TraceCollector {
@@ -56,7 +57,7 @@ impl TraceCollector {
                 .and_then(|value| value.as_str())
                 .unwrap_or("unknown")
                 .to_string();
-
+            let source = TestEventSource::from(source);
             let event = TraceEvent { source, payload };
             let mut events = self.events.lock().await;
             events.push(event);
@@ -73,12 +74,25 @@ impl TraceCollector {
         event_name: &str,
         timeout_secs_max: u64,
     ) -> anyhow::Result<TraceEvent> {
-        self.wait_for_event(
-            |event| event.payload.get("event").and_then(|value| value.as_str()) == Some(event_name),
-            timeout_secs_max,
-        )
-        .await
-        .with_context(|| format!("waiting for trace event {}", event_name))
+        let result = self
+            .wait_for_event(
+                |event| {
+                    event.payload.get("event").and_then(|value| value.as_str())
+                        == Some(event_name)
+                },
+                timeout_secs_max,
+            )
+            .await;
+
+        match result {
+            Ok(event) => Ok(event),
+            Err(err) => {
+                let summary = self.last_events_summary().await;
+                Err(err).with_context(|| {
+                    format!("waiting for trace event {}. observed: {}", event_name, summary)
+                })
+            }
+        }
     }
 
     pub async fn wait_for_event_from_source(
@@ -87,16 +101,29 @@ impl TraceCollector {
         event_name: &str,
         timeout_secs_max: u64,
     ) -> anyhow::Result<TraceEvent> {
-        self.wait_for_event(
-            |event| {
-                event.source == source
-                    && event.payload.get("event").and_then(|value| value.as_str())
-                        == Some(event_name)
-            },
-            timeout_secs_max,
-        )
-        .await
-        .with_context(|| format!("waiting for {} trace event from {}", event_name, source))
+        let result = self
+            .wait_for_event(
+                |event| {
+                    <TestEventSource as Into<&str>>::into(event.source) == source
+                        && event.payload.get("event").and_then(|value| value.as_str())
+                            == Some(event_name)
+                },
+                timeout_secs_max,
+            )
+            .await;
+
+        match result {
+            Ok(event) => Ok(event),
+            Err(err) => {
+                let summary = self.last_events_summary().await;
+                Err(err).with_context(|| {
+                    format!(
+                        "waiting for {} trace event from {}. observed: {}",
+                        event_name, source, summary
+                    )
+                })
+            }
+        }
     }
 
     pub async fn wait_for_event(
@@ -125,7 +152,7 @@ impl TraceCollector {
         timeout_secs_max: u64,
     ) -> anyhow::Result<Vec<TraceEvent>> {
         let deadline = Duration::from_secs(timeout_secs_max);
-        timeout(deadline, async {
+        let result = timeout(deadline, async {
             loop {
                 let events = self.snapshot().await;
                 if let Some(matched) = match_sequence(&events, sequence) {
@@ -134,8 +161,47 @@ impl TraceCollector {
                 tokio::task::yield_now().await;
             }
         })
-        .await
-        .context("waiting for trace sequence")
+        .await;
+
+        match result {
+            Ok(matched) => Ok(matched),
+            Err(err) => {
+                let summary = self.last_events_summary().await;
+                Err(err).with_context(|| {
+                    format!(
+                        "waiting for trace sequence: [{}]. observed: {}",
+                        sequence.describe(),
+                        summary
+                    )
+                })
+            }
+        }
+    }
+
+    async fn last_events_summary(&self) -> String {
+        let events = self.events.lock().await;
+        if events.is_empty() {
+            return "no events".to_string();
+        }
+
+        let tail = events.iter().rev().take(8).rev();
+        let mut entries = Vec::new();
+        for event in tail {
+            let name = event
+                .payload
+                .get("event")
+                .and_then(|value| value.as_str())
+                .unwrap_or("unknown");
+            let source = <TestEventSource as Into<&str>>::into(event.source);
+            entries.push(format!("{}:{}", source, name));
+        }
+
+        format!(
+            "last {} of {} -> {}",
+            entries.len(),
+            events.len(),
+            entries.join(", ")
+        )
     }
 }
 
@@ -143,8 +209,8 @@ impl TraceSequence {
     pub fn new() -> Self {
         Self { steps: Vec::new() }
     }
-
-    pub fn event(mut self, event: impl Into<String>) -> Self {
+    /// See [`tantylla_common::test_tracing::TestEvent`] for available events
+    pub fn event(mut self, event: impl Into<TestEvent>) -> Self {
         self.steps.push(TraceSequenceStep {
             source: None,
             event: event.into(),
@@ -152,16 +218,27 @@ impl TraceSequence {
         self
     }
 
+    /// See [`tantylla_common::test_tracing::TestEventSource`] for available sources
+    ///
+    /// See [`tantylla_common::test_tracing::TestEvent`] for available events
     pub fn event_from_source(
         mut self,
-        source: impl Into<String>,
-        event: impl Into<String>,
+        source: impl Into<TestEventSource>,
+        event: impl Into<TestEvent>,
     ) -> Self {
         self.steps.push(TraceSequenceStep {
             source: Some(source.into()),
             event: event.into(),
         });
         self
+    }
+
+    fn describe(&self) -> String {
+        self.steps
+            .iter()
+            .map(|step| step.describe())
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 }
 
@@ -194,6 +271,16 @@ impl TraceSequenceStep {
             }
         }
 
-        event.payload.get("event").and_then(|value| value.as_str()) == Some(self.event.as_str())
+        event.payload.get("event").and_then(|value| value.as_str()) == Some(self.event.into())
+    }
+
+    fn describe(&self) -> String {
+        let event = <TestEvent as Into<&str>>::into(self.event);
+        if let Some(source) = &self.source {
+            let source = <TestEventSource as Into<&str>>::into(*source);
+            format!("{}:{}", source, event)
+        } else {
+            event.to_string()
+        }
     }
 }

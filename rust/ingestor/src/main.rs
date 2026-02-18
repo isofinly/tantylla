@@ -6,8 +6,11 @@ use std::{
     sync::{Arc, OnceLock},
     time::{Duration, SystemTime},
 };
-use tantylla_common::logger;
-use tantylla_common::test_tracing::TestEventLayer;
+use tantylla_common::tracing::layer::TestEventLayer;
+use tantylla_common::{
+    logger,
+    tracing::events::{TestEvent, TestEventSource},
+};
 use tokio::time;
 use tracing::{error, info};
 
@@ -155,8 +158,8 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!(
         target: "test_event",
-        source = "ingestor",
-        event = "startup",
+        source = %TestEventSource::Ingestor,
+        event = %TestEvent::Startup,
         table = format!("{}.{}", keyspace, table)
     );
 

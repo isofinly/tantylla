@@ -4,7 +4,10 @@ use axum::{
     response::IntoResponse,
 };
 use std::sync::Arc;
-use tantylla_common::indexer::SearchRequest;
+use tantylla_common::{
+    indexer::SearchRequest,
+    tracing::events::{TestEvent, TestEventSource},
+};
 
 use crate::{querier::core::scatter_gather, server::core::AppState};
 
@@ -20,8 +23,8 @@ pub async fn search_handler(
 
     tracing::info!(
         target: "test_event",
-        source = "gateway",
-        event = "search_request",
+        source = %TestEventSource::Gateway,
+        event = %TestEvent::SearchRequest,
         query,
         limit,
         offset,
@@ -32,8 +35,8 @@ pub async fn search_handler(
         Ok(response) => {
             tracing::info!(
                 target: "test_event",
-                source = "gateway",
-                event = "search_response",
+                source = %TestEventSource::Gateway,
+                event = %TestEvent::SearchResponse,
                 total_hits = response.total_hits,
                 hit_count = response.hits.len(),
                 duration_ms = response.duration_ms
@@ -43,8 +46,8 @@ pub async fn search_handler(
         Err(e) => {
             tracing::info!(
                 target: "test_event",
-                source = "gateway",
-                event = "search_failure",
+                source = %TestEventSource::Gateway,
+                event = %TestEvent::SearchFailure,
                 error = e.to_string()
             );
             (StatusCode::INTERNAL_SERVER_ERROR, Json(e)).into_response()

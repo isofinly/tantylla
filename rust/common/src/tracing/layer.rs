@@ -8,10 +8,6 @@ use tracing_subscriber::Layer;
 use tracing_subscriber::layer::Context as LayerContext;
 use tracing_subscriber::registry::LookupSpan;
 
-// =========================================================================
-// Debug Test Event Layer
-// =========================================================================
-
 #[derive(Debug, Clone)]
 pub struct TestEventLayer {
     socket: Arc<UdpSocket>,

@@ -1,8 +1,11 @@
 use crate::engine::core::{AdaptiveConfig, Engine};
 use anyhow::Result;
-use tantylla_common::indexer::{
-    HealthCheckRequest, HealthCheckResponse, IndexBatchRequest, IndexBatchResponse, SearchRequest,
-    SearchResponse, index_service_server::IndexService,
+use tantylla_common::{
+    indexer::{
+        HealthCheckRequest, HealthCheckResponse, IndexBatchRequest, IndexBatchResponse,
+        SearchRequest, SearchResponse, index_service_server::IndexService,
+    },
+    tracing::events::{TestEvent, TestEventSource},
 };
 use tonic::{Request, Response, Status};
 use tracing::debug;
@@ -31,8 +34,8 @@ impl IndexService for IndexServiceService {
 
         tracing::info!(
             target: "test_event",
-            source = "node",
-            event = "index_batch_request",
+            source = %TestEventSource::Node,
+            event = %TestEvent::IndexBatchRequest,
             operation_count
         );
 
@@ -40,8 +43,8 @@ impl IndexService for IndexServiceService {
             Ok(response) => {
                 tracing::info!(
                     target: "test_event",
-                    source = "node",
-                    event = "index_batch_response",
+                    source = %TestEventSource::Node,
+                    event = %TestEvent::IndexBatchResponse,
                     processed_count = response.processed_count,
                     skipped_count = response.skipped_count,
                     success = response.success
@@ -51,8 +54,8 @@ impl IndexService for IndexServiceService {
             Err(err) => {
                 tracing::info!(
                     target: "test_event",
-                    source = "node",
-                    event = "index_batch_failure",
+                    source = %TestEventSource::Node,
+                    event = %TestEvent::IndexBatchFailure,
                     error = err.to_string()
                 );
                 Err(Status::internal(err.to_string()))
@@ -72,8 +75,8 @@ impl IndexService for IndexServiceService {
 
         tracing::info!(
             target: "test_event",
-            source = "node",
-            event = "search_request",
+            source = %TestEventSource::Node,
+            event = %TestEvent::SearchRequest,
             query,
             limit,
             offset
@@ -86,8 +89,8 @@ impl IndexService for IndexServiceService {
             Ok(response) => {
                 tracing::info!(
                     target: "test_event",
-                    source = "node",
-                    event = "search_response",
+                    source = %TestEventSource::Node,
+                    event = %TestEvent::SearchResponse,
                     total_hits = response.total_hits,
                     duration_ms = response.duration_ms
                 );
@@ -96,8 +99,8 @@ impl IndexService for IndexServiceService {
             Err(err) => {
                 tracing::info!(
                     target: "test_event",
-                    source = "node",
-                    event = "search_failure",
+                    source = %TestEventSource::Node,
+                    event = %TestEvent::SearchFailure,
                     error = err.to_string()
                 );
                 Err(Status::internal(err.to_string()))

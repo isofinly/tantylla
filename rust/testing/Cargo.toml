@@ -19,3 +19,4 @@ futures = "0.3"
 portpicker = "0.1"
 tempfile = "3.10"
 nix = { version = "0.29", features = ["signal"] }
+tantylla-common = { path = "../common" }

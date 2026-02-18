@@ -2544,6 +2544,7 @@ dependencies = [
  "scylla",
  "serde",
  "serde_json",
+ "tantylla-common",
  "tempfile",
  "tokio",
  "tracing",

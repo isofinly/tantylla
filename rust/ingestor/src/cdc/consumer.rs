@@ -2,6 +2,7 @@ use crate::router::core::Router;
 use async_trait::async_trait;
 use scylla_cdc::consumer::CDCRow;
 use std::sync::Arc;
+use tantylla_common::tracing::events::{TestEvent, TestEventSource};
 
 #[derive(Clone)]
 pub(crate) struct Consumer {
@@ -13,8 +14,8 @@ impl scylla_cdc::consumer::Consumer for Consumer {
     async fn consume_cdc(&mut self, data: CDCRow<'_>) -> anyhow::Result<()> {
         tracing::info!(
             target: "test_event",
-            source = "ingestor",
-            event = "cdc_row_received",
+            source = %TestEventSource::Ingestor,
+            event = %TestEvent::CdcRowReceived,
             operation = format!("{:?}", data.operation)
         );
         match self.router.route(&data).await {

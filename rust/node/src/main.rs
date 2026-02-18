@@ -1,6 +1,7 @@
 use anyhow::Context;
 use clap::Parser;
-use tantylla_common::test_tracing::TestEventLayer;
+use tantylla_common::tracing::events::{TestEvent, TestEventSource};
+use tantylla_common::tracing::layer::TestEventLayer;
 use tantylla_common::{indexer::index_service_server::IndexServiceServer, logger};
 use tonic::transport::Server;
 use tracing::info;
@@ -61,7 +62,7 @@ async fn main() -> anyhow::Result<()> {
         commit_interval_secs: args.commit_interval_secs,
     };
 
-    tracing::info!(target: "test_event", source = "node", event = "startup", port = args.port);
+    tracing::info!(target: "test_event", source = %TestEventSource::Node, event = %TestEvent::Startup, port = args.port);
 
     let svc = IndexServiceService::new(format!("./index-{}", args.port), config)?;
 
