@@ -1,4 +1,5 @@
 use crate::cluster::config::{InstrumentationConfig, SchemaConfig, ScyllaConfig, TopologyConfig};
+use crate::cluster::gateway::GatewayClient;
 use crate::cluster::scylladb::{
     apply_schema, connect_scylla, create_keyspace, ensure_binaries, wait_for_cdc_log_table,
 };
@@ -7,6 +8,8 @@ use crate::cluster::utils::{parse_checkpoint, remove_dir_if_exists, remove_file_
 use crate::process::{ServiceProcess, workspace_root};
 use crate::trace::TraceCollector;
 use anyhow::Context;
+use futures::FutureExt;
+use futures::future::BoxFuture;
 use scylla::client::session::Session;
 use std::net::SocketAddr;
 use std::{fs, io::ErrorKind, path::PathBuf};
@@ -198,6 +201,38 @@ impl TestCluster {
 
     pub fn trace_collector(&self) -> Option<TraceCollector> {
         self.trace_collector.clone()
+    }
+
+    pub fn gateway(&self) -> anyhow::Result<GatewayClient> {
+        let addr = self.gateway_addrs().first().context("no gateway addresses available")?;
+        Ok(GatewayClient::new(addr))
+    }
+
+    pub async fn insert_document(&self, doc_id: &str, title: &str, body: &str) -> anyhow::Result<()> {
+        let insert_cql = format!(
+            "INSERT INTO {}.{} (doc_id, title, body) VALUES (?, ?, ?)",
+            self.keyspace(),
+            self.table_name(),
+        );
+        self.session()
+            .query_unpaged(insert_cql, (doc_id, title, body))
+            .await
+            .context("inserting document")?;
+        Ok(())
+    }
+
+    pub async fn scoped<F>(mut self, f: F) -> anyhow::Result<()>
+    where
+        F: for<'a> FnOnce(&'a mut TestCluster) -> BoxFuture<'a, anyhow::Result<()>>,
+    {
+        let result = std::panic::AssertUnwindSafe(f(&mut self)).catch_unwind().await;
+
+        self.shutdown().await.context("shutting down cluster in scoped scope")?;
+
+        match result {
+            Ok(res) => res,
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
     }
 
     pub fn instrumentation(&self) -> &InstrumentationConfig {

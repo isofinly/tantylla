@@ -1,7 +1,7 @@
 use anyhow::Context;
 use serde_json::Value;
 use std::sync::Arc;
-use tantylla_common::tracing::events::{TestEvent, TestEventSource};
+use tantylla_common::tracing::events::{TestEvent, TestEventSource, TracePayload};
 use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
 use tokio::time::{Duration, timeout};
@@ -13,7 +13,7 @@ use tokio::time::{Duration, timeout};
 #[derive(Clone, Debug)]
 pub struct TraceEvent {
     pub source: TestEventSource,
-    pub payload: Value,
+    pub payload: TracePayload,
 }
 
 #[derive(Clone, Default)]
@@ -47,17 +47,26 @@ impl TraceCollector {
                 break;
             };
 
-            let payload = match serde_json::from_slice::<Value>(&buf[..len]) {
+            let json = match serde_json::from_slice::<Value>(&buf[..len]) {
                 Ok(value) => value,
                 Err(_) => continue,
             };
 
-            let source = payload
+            let source = json
                 .get("source")
                 .and_then(|value| value.as_str())
-                .unwrap_or("unknown")
+                .unwrap_or("Unspecified")
                 .to_string();
             let source = TestEventSource::from(source);
+
+            let payload = match serde_json::from_slice::<TracePayload>(&buf[..len]) {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!(error = %e, json = ?json, "failed to parse trace payload");
+                    continue;
+                }
+            };
+
             let event = TraceEvent { source, payload };
             let mut events = self.events.lock().await;
             events.push(event);
@@ -71,15 +80,13 @@ impl TraceCollector {
 
     pub async fn wait_for_event_name(
         &self,
-        event_name: &str,
+        event_name: TestEvent,
         timeout_secs_max: u64,
     ) -> anyhow::Result<TraceEvent> {
+        let event_str: &str = event_name.into();
         let result = self
             .wait_for_event(
-                |event| {
-                    event.payload.get("event").and_then(|value| value.as_str())
-                        == Some(event_name)
-                },
+                |event| event.name() == event_str,
                 timeout_secs_max,
             )
             .await;
@@ -89,7 +96,7 @@ impl TraceCollector {
             Err(err) => {
                 let summary = self.last_events_summary().await;
                 Err(err).with_context(|| {
-                    format!("waiting for trace event {}. observed: {}", event_name, summary)
+                    format!("waiting for trace event {}. observed: {}", event_str, summary)
                 })
             }
         }
@@ -97,16 +104,15 @@ impl TraceCollector {
 
     pub async fn wait_for_event_from_source(
         &self,
-        source: &str,
-        event_name: &str,
+        source: TestEventSource,
+        event_name: TestEvent,
         timeout_secs_max: u64,
     ) -> anyhow::Result<TraceEvent> {
+        let event_str: &str = event_name.into();
         let result = self
             .wait_for_event(
                 |event| {
-                    <TestEventSource as Into<&str>>::into(event.source) == source
-                        && event.payload.get("event").and_then(|value| value.as_str())
-                            == Some(event_name)
+                    event.source == source && event.name() == event_str
                 },
                 timeout_secs_max,
             )
@@ -118,8 +124,8 @@ impl TraceCollector {
                 let summary = self.last_events_summary().await;
                 Err(err).with_context(|| {
                     format!(
-                        "waiting for {} trace event from {}. observed: {}",
-                        event_name, source, summary
+                        "waiting for {} trace event from {:?}. observed: {}",
+                        event_str, source, summary
                     )
                 })
             }
@@ -187,11 +193,7 @@ impl TraceCollector {
         let tail = events.iter().rev().take(8).rev();
         let mut entries = Vec::new();
         for event in tail {
-            let name = event
-                .payload
-                .get("event")
-                .and_then(|value| value.as_str())
-                .unwrap_or("unknown");
+            let name = event.name();
             let source = <TestEventSource as Into<&str>>::into(event.source);
             entries.push(format!("{}:{}", source, name));
         }
@@ -202,6 +204,26 @@ impl TraceCollector {
             events.len(),
             entries.join(", ")
         )
+    }
+}
+
+impl TraceEvent {
+    pub fn name(&self) -> &'static str {
+        match &self.payload {
+            TracePayload::Startup { .. } => TestEvent::Startup.into(),
+            TracePayload::SearchRequest { .. } => TestEvent::SearchRequest.into(),
+            TracePayload::SearchResponse { .. } => TestEvent::SearchResponse.into(),
+            TracePayload::SearchFailure { .. } => TestEvent::SearchFailure.into(),
+            TracePayload::BatchFlushStart { .. } => TestEvent::BatchFlushStart.into(),
+            TracePayload::BatchFlushNodeSuccess { .. } => TestEvent::BatchFlushNodeSuccess.into(),
+            TracePayload::BatchFlushNodeFailure { .. } => TestEvent::BatchFlushNodeFailure.into(),
+            TracePayload::BatchFlushFailed { .. } => TestEvent::BatchFlushFailed.into(),
+            TracePayload::BatchFlushSuccess { .. } => TestEvent::BatchFlushSuccess.into(),
+            TracePayload::CdcRowReceived { .. } => TestEvent::CdcRowReceived.into(),
+            TracePayload::CdcRowRouted { .. } => TestEvent::CdcRowRouted.into(),
+            TracePayload::IndexBatchResponse { .. } => TestEvent::IndexBatchResponse.into(),
+            TracePayload::Unknown => "Unknown",
+        }
     }
 }
 
@@ -271,7 +293,7 @@ impl TraceSequenceStep {
             }
         }
 
-        event.payload.get("event").and_then(|value| value.as_str()) == Some(self.event.into())
+        event.name() == <TestEvent as Into<&str>>::into(self.event)
     }
 
     fn describe(&self) -> String {

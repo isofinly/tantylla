@@ -1,7 +1,8 @@
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Copy)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Copy, Serialize, Deserialize)]
 pub enum TestEventSource {
     Gateway,
     Ingestor,
@@ -9,7 +10,7 @@ pub enum TestEventSource {
     #[default]
     Unspecified,
 }
-#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Copy)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Copy, Serialize, Deserialize)]
 pub enum TestEvent {
     Startup,
     SearchRequest,
@@ -28,6 +29,68 @@ pub enum TestEvent {
     IndexBatchFailure,
     #[default]
     Unspecified,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "event")]
+pub enum TracePayload {
+    Startup {},
+    SearchRequest {
+        query: String,
+        #[serde(default)]
+        limit: u32,
+        #[serde(default)]
+        offset: u32,
+        #[serde(default)]
+        consistency: i32,
+    },
+    SearchResponse {
+        #[serde(default)]
+        hit_count: usize,
+        #[serde(default)]
+        total_hits: u64,
+        #[serde(default)]
+        duration_ms: u64,
+    },
+    SearchFailure {
+        message: Option<String>,
+    },
+    BatchFlushStart {
+        table: String,
+        item_count: usize,
+    },
+    BatchFlushNodeSuccess {
+        table: String,
+        target_node: String,
+        processed_count: u32,
+        skipped_count: u32,
+        success: bool,
+    },
+    BatchFlushNodeFailure {
+        table: String,
+        target_node: String,
+        error: String,
+    },
+    BatchFlushFailed {
+        table: String,
+        failed_nodes: Vec<String>,
+    },
+    BatchFlushSuccess {
+        table: String,
+    },
+    CdcRowReceived {
+        operation: String,
+    },
+    CdcRowRouted {
+        node_count: usize,
+    },
+    IndexBatchResponse {
+        processed_count: u32,
+        skipped_count: u32,
+        success: bool,
+    },
+    #[serde(other)]
+    Unknown,
 }
 
 impl fmt::Display for TestEventSource {

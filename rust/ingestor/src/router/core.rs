@@ -81,6 +81,7 @@ impl Router {
             target: "test_event",
             source = %TestEventSource::Ingestor,
             event = %TestEvent::CdcRowRouted,
+            node_count = self.node_info.len(),
             table = self.table_name,
             id,
             op = format!("{:?}", op_type),

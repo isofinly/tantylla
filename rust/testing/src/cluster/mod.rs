@@ -1,5 +1,6 @@
 mod config;
 mod core;
+pub mod gateway;
 mod scylladb;
 mod services;
 mod utils;
