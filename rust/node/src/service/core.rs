@@ -32,7 +32,7 @@ impl IndexService for IndexServiceService {
         let req = request.into_inner();
         let operation_count = req.operations.len();
 
-        tracing::info!(
+        tracing::debug!(
             target: "test_event",
             source = %TestEventSource::Node,
             event = %TestEvent::IndexBatchRequest,
@@ -41,7 +41,7 @@ impl IndexService for IndexServiceService {
 
         match self.engine.process_batch(req.operations) {
             Ok(response) => {
-                tracing::info!(
+                tracing::debug!(
                     target: "test_event",
                     source = %TestEventSource::Node,
                     event = %TestEvent::IndexBatchResponse,
@@ -52,7 +52,7 @@ impl IndexService for IndexServiceService {
                 Ok(Response::new(response))
             }
             Err(err) => {
-                tracing::info!(
+                tracing::debug!(
                     target: "test_event",
                     source = %TestEventSource::Node,
                     event = %TestEvent::IndexBatchFailure,
@@ -73,7 +73,7 @@ impl IndexService for IndexServiceService {
         let limit = req.limit;
         let offset = req.offset;
 
-        tracing::info!(
+        tracing::debug!(
             target: "test_event",
             source = %TestEventSource::Node,
             event = %TestEvent::SearchRequest,
@@ -87,7 +87,7 @@ impl IndexService for IndexServiceService {
             .search(&req.query, req.limit as usize, req.offset as usize)
         {
             Ok(response) => {
-                tracing::info!(
+                tracing::debug!(
                     target: "test_event",
                     source = %TestEventSource::Node,
                     event = %TestEvent::SearchResponse,
@@ -97,7 +97,7 @@ impl IndexService for IndexServiceService {
                 Ok(Response::new(response))
             }
             Err(err) => {
-                tracing::info!(
+                tracing::debug!(
                     target: "test_event",
                     source = %TestEventSource::Node,
                     event = %TestEvent::SearchFailure,

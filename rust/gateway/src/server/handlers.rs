@@ -21,7 +21,7 @@ pub async fn search_handler(
     let offset = payload.offset;
     let consistency = payload.consistency;
 
-    tracing::info!(
+    tracing::debug!(
         target: "test_event",
         source = %TestEventSource::Gateway,
         event = %TestEvent::SearchRequest,
@@ -33,7 +33,7 @@ pub async fn search_handler(
 
     match scatter_gather(state.clone(), payload).await {
         Ok(response) => {
-            tracing::info!(
+            tracing::debug!(
                 target: "test_event",
                 source = %TestEventSource::Gateway,
                 event = %TestEvent::SearchResponse,
@@ -44,7 +44,7 @@ pub async fn search_handler(
             (StatusCode::OK, Json(response)).into_response()
         }
         Err(e) => {
-            tracing::info!(
+            tracing::debug!(
                 target: "test_event",
                 source = %TestEventSource::Gateway,
                 event = %TestEvent::SearchFailure,

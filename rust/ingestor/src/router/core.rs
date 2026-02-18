@@ -77,7 +77,7 @@ impl Router {
 
         let id = pk_values.join(":");
 
-        tracing::info!(
+        tracing::debug!(
             target: "test_event",
             source = %TestEventSource::Ingestor,
             event = %TestEvent::CdcRowRouted,
@@ -113,10 +113,10 @@ impl Router {
         match self.batch_service.add(batch_item_json).await {
             Ok(_) => Ok(()),
             Err(e) => {
-                tracing::info!(
+                tracing::debug!(
                     target: "test_event",
                     source = %TestEventSource::Ingestor,
-                    event = %TestEvent::BatchEnqueueFailed,
+                    event = %TestEvent::BatchAddFailure,
                     table = self.table_name,
                     id,
                     target_node,

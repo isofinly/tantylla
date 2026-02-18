@@ -27,5 +27,9 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter", "chrono"] }
 tracing-appender = "0.2.3"
 
+strum = { version = "0.26", features = ["derive"] }
+strum_macros = "0.26"
+
+
 [build-dependencies]
 tonic-prost-build = "0.14"

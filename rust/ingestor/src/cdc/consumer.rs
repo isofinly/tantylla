@@ -12,7 +12,7 @@ pub(crate) struct Consumer {
 #[async_trait]
 impl scylla_cdc::consumer::Consumer for Consumer {
     async fn consume_cdc(&mut self, data: CDCRow<'_>) -> anyhow::Result<()> {
-        tracing::info!(
+        tracing::debug!(
             target: "test_event",
             source = %TestEventSource::Ingestor,
             event = %TestEvent::CdcRowReceived,

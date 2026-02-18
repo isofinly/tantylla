@@ -38,15 +38,22 @@ async fn e2e_cdc_to_gateway_search() -> Result<()> {
                 cluster.insert_document(&doc_id, "hello", "world").await?;
 
                 let ingestion_sequence = TraceSequence::new()
-                    .event(TestEvent::CdcRowReceived)
-                    .event(TestEvent::CdcRowRouted)
-                    .event(TestEvent::IndexBatchResponse);
+                    .event_from_source(TestEventSource::Ingestor, TestEvent::CdcRowReceived)
+                    .event_from_source(TestEventSource::Ingestor, TestEvent::CdcRowRouted)
+                    .event_from_source(TestEventSource::Ingestor, TestEvent::BatchAddEnter)
+                    .event_from_source(TestEventSource::Ingestor, TestEvent::BatchFlushStart)
+                    .event_from_source(TestEventSource::Node, TestEvent::IndexBatchRequest)
+                    .event_from_source(TestEventSource::Node, TestEvent::EngineProcessBatchEnter)
+                    .event_from_source(TestEventSource::Node, TestEvent::IndexBatchResponse)
+                    .event_from_source(TestEventSource::Ingestor, TestEvent::BatchFlushNodeSuccess)
+                    .event_from_source(TestEventSource::Ingestor, TestEvent::BatchFlushSuccess);
                 let matched_events = trace_collector
                     .wait_for_sequence(&ingestion_sequence, 20)
                     .await?;
 
                 let index_event = matched_events
-                    .last()
+                    .iter()
+                    .find(|event| event.discriminant() == TestEvent::IndexBatchResponse)
                     .context("missing index_batch_response event")?;
 
                 if let TracePayload::IndexBatchResponse {
@@ -84,6 +91,22 @@ async fn e2e_cdc_to_gateway_search() -> Result<()> {
                     "Gateway query matched"
                 );
                 ensure!(!response.hits.is_empty(), "gateway returned no hits");
+
+                let search_sequence = TraceSequence::new()
+                    .event_from_source(TestEventSource::Gateway, TestEvent::SearchRequest)
+                    .event_from_source(
+                        TestEventSource::Gateway,
+                        TestEvent::GatewayScatterGatherEnter,
+                    )
+                    .event_from_source(TestEventSource::Node, TestEvent::SearchRequest)
+                    .event_from_source(TestEventSource::Node, TestEvent::EngineSearchEnter)
+                    .event_from_source(TestEventSource::Node, TestEvent::SearchResponse)
+                    .event_from_source(TestEventSource::Gateway, TestEvent::SearchResponse);
+                // TODO: Use this variable
+                let matched_events = trace_collector
+                    .wait_for_sequence(&search_sequence, 20)
+                    .await
+                    .context("waiting for search trace sequence")?;
 
                 Ok(())
             }
@@ -141,7 +164,13 @@ async fn e2e_gateway_failure_on_missing_node() -> Result<()> {
                     Err(e) => bail!("unexpected error: {}", e),
                 }
 
-                let failure_sequence = TraceSequence::new().event(TestEvent::SearchFailure);
+                let failure_sequence = TraceSequence::new()
+                    .event_from_source(TestEventSource::Gateway, TestEvent::SearchRequest)
+                    .event_from_source(
+                        TestEventSource::Gateway,
+                        TestEvent::GatewayScatterGatherEnter,
+                    )
+                    .event_from_source(TestEventSource::Gateway, TestEvent::SearchFailure);
                 trace_collector
                     .wait_for_sequence(&failure_sequence, 20)
                     .await?;

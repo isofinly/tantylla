@@ -156,7 +156,7 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    tracing::info!(
+    tracing::debug!(
         target: "test_event",
         source = %TestEventSource::Ingestor,
         event = %TestEvent::Startup,

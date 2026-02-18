@@ -5,6 +5,7 @@ use std::{error::Error, sync::Arc};
 use tantylla_common::indexer::{
     SearchHit, SearchRequest, SearchResponse, search_request::Consistency,
 };
+use tantylla_common::tracing::events::{TestEvent, TestEventSource};
 use tonic::Request;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -34,6 +35,12 @@ pub async fn scatter_gather(
     state: Arc<AppState>,
     req: SearchRequest,
 ) -> Result<SearchResponse, ScatterFail> {
+    tracing::debug!(
+        target: "test_event",
+        source = %TestEventSource::Gateway,
+        event = %TestEvent::GatewayScatterGatherEnter
+    );
+
     let clients = &state.clients;
     let consistency = req.consistency();
     let total_nodes = clients.len();

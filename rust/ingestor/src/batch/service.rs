@@ -2,6 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::checkpointer::core::Checkpointer;
 use ahash::AHashMap;
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use tantylla_common::{
     indexer::{
@@ -96,7 +97,14 @@ impl Service {
     /// Adds an item to the buffer.
     /// If backpressure is active, returns an error to stop CDC ingestion.
     pub(crate) async fn add(&self, item: String) -> Result<(), BatchFlushError> {
+        tracing::debug!(
+            target: "test_event",
+            source = %TestEventSource::Ingestor,
+            event = %TestEvent::BatchAddEnter
+        );
+
         if self.is_backpressure_active() {
+            // TODO: Maybe emit an event here?
             return Err(BatchFlushError {
                 // TODO: Not enough context info to determine failed nodes
                 failed_nodes: vec![],
@@ -111,7 +119,9 @@ impl Service {
         };
 
         if should_flush {
-            self.flush().await?;
+            self.flush()
+                .await
+                .context("Failedd to flush the buffer to the nodes")?;
         }
 
         Ok(())
@@ -131,7 +141,7 @@ impl Service {
 
         info!("Flushing batch of {} items", items_to_process.len());
 
-        tracing::info!(
+        tracing::debug!(
             target: "test_event",
             source = %TestEventSource::Ingestor,
             event = %TestEvent::BatchFlushStart,
@@ -193,7 +203,7 @@ impl Service {
                             response.skipped_count,
                             response.success
                         );
-                        tracing::info!(
+                        tracing::debug!(
                             target: "test_event",
                             source = %TestEventSource::Ingestor,
                             event = %TestEvent::BatchFlushNodeSuccess,
@@ -227,7 +237,7 @@ impl Service {
                         "Node {}: Failed to index batch after all retries: {}",
                         target_node, e
                     );
-                    tracing::info!(
+                    tracing::debug!(
                         target: "test_event",
                         source = %TestEventSource::Ingestor,
                         event = %TestEvent::BatchFlushNodeFailure,
@@ -242,7 +252,7 @@ impl Service {
 
         if !failed_nodes.is_empty() {
             let failed_count = failed_nodes.len();
-            tracing::info!(
+            tracing::debug!(
                 target: "test_event",
                 source = %TestEventSource::Ingestor,
                 event = %TestEvent::BatchFlushFailed,
@@ -255,7 +265,7 @@ impl Service {
             });
         }
 
-        tracing::info!(
+        tracing::debug!(
             target: "test_event",
             source = %TestEventSource::Ingestor,
             event = %TestEvent::BatchFlushSuccess,
@@ -366,6 +376,15 @@ impl std::fmt::Display for BatchFlushError {
             "Batch flush failed: {} (nodes: {:?})",
             self.message, self.failed_nodes
         )
+    }
+}
+
+impl From<anyhow::Error> for BatchFlushError {
+    fn from(e: anyhow::Error) -> Self {
+        BatchFlushError {
+            failed_nodes: vec![],
+            message: format!("Batch flush failed: {}", e),
+        }
     }
 }
 

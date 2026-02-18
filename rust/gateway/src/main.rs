@@ -80,7 +80,7 @@ async fn main() -> anyhow::Result<()> {
         clients.push(client);
     }
 
-    tracing::info!(target: "test_event", source = %TestEventSource::Gateway, event = %TestEvent::Startup, port = args.port);
+    tracing::debug!(target: "test_event", source = %TestEventSource::Gateway, event = %TestEvent::Startup, port = args.port);
 
     let state = Arc::new(AppState { clients });
 

@@ -62,7 +62,7 @@ async fn main() -> anyhow::Result<()> {
         commit_interval_secs: args.commit_interval_secs,
     };
 
-    tracing::info!(target: "test_event", source = %TestEventSource::Node, event = %TestEvent::Startup, port = args.port);
+    tracing::debug!(target: "test_event", source = %TestEventSource::Node, event = %TestEvent::Startup, port = args.port);
 
     let svc = IndexServiceService::new(format!("./index-{}", args.port), config)?;
 

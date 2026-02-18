@@ -1,5 +1,6 @@
 use anyhow::Context;
 use serde_json::Value;
+use std::str::FromStr;
 use std::sync::Arc;
 use tantylla_common::tracing::events::{TestEvent, TestEventSource, TracePayload};
 use tokio::net::UdpSocket;
@@ -57,7 +58,9 @@ impl TraceCollector {
                 .and_then(|value| value.as_str())
                 .unwrap_or("Unspecified")
                 .to_string();
-            let source = TestEventSource::from(source);
+            let source = TestEventSource::from_str(&source)
+                .context("Failed to create event from source string")
+                .unwrap();
 
             let payload = match serde_json::from_slice::<TracePayload>(&buf[..len]) {
                 Ok(p) => p,
@@ -83,12 +86,8 @@ impl TraceCollector {
         event_name: TestEvent,
         timeout_secs_max: u64,
     ) -> anyhow::Result<TraceEvent> {
-        let event_str: &str = event_name.into();
         let result = self
-            .wait_for_event(
-                |event| event.name() == event_str,
-                timeout_secs_max,
-            )
+            .wait_for_event(|event| event.discriminant() == event_name, timeout_secs_max)
             .await;
 
         match result {
@@ -96,7 +95,11 @@ impl TraceCollector {
             Err(err) => {
                 let summary = self.last_events_summary().await;
                 Err(err).with_context(|| {
-                    format!("waiting for trace event {}. observed: {}", event_str, summary)
+                    format!(
+                        "waiting for trace event {}. observed: {}",
+                        <TestEvent as Into<&str>>::into(event_name),
+                        summary
+                    )
                 })
             }
         }
@@ -108,12 +111,9 @@ impl TraceCollector {
         event_name: TestEvent,
         timeout_secs_max: u64,
     ) -> anyhow::Result<TraceEvent> {
-        let event_str: &str = event_name.into();
         let result = self
             .wait_for_event(
-                |event| {
-                    event.source == source && event.name() == event_str
-                },
+                |event| event.source == source && event.discriminant() == event_name,
                 timeout_secs_max,
             )
             .await;
@@ -125,7 +125,7 @@ impl TraceCollector {
                 Err(err).with_context(|| {
                     format!(
                         "waiting for {} trace event from {:?}. observed: {}",
-                        event_str, source, summary
+                        event_name, source, summary
                     )
                 })
             }
@@ -193,7 +193,7 @@ impl TraceCollector {
         let tail = events.iter().rev().take(8).rev();
         let mut entries = Vec::new();
         for event in tail {
-            let name = event.name();
+            let name = event.discriminant();
             let source = <TestEventSource as Into<&str>>::into(event.source);
             entries.push(format!("{}:{}", source, name));
         }
@@ -208,22 +208,8 @@ impl TraceCollector {
 }
 
 impl TraceEvent {
-    pub fn name(&self) -> &'static str {
-        match &self.payload {
-            TracePayload::Startup { .. } => TestEvent::Startup.into(),
-            TracePayload::SearchRequest { .. } => TestEvent::SearchRequest.into(),
-            TracePayload::SearchResponse { .. } => TestEvent::SearchResponse.into(),
-            TracePayload::SearchFailure { .. } => TestEvent::SearchFailure.into(),
-            TracePayload::BatchFlushStart { .. } => TestEvent::BatchFlushStart.into(),
-            TracePayload::BatchFlushNodeSuccess { .. } => TestEvent::BatchFlushNodeSuccess.into(),
-            TracePayload::BatchFlushNodeFailure { .. } => TestEvent::BatchFlushNodeFailure.into(),
-            TracePayload::BatchFlushFailed { .. } => TestEvent::BatchFlushFailed.into(),
-            TracePayload::BatchFlushSuccess { .. } => TestEvent::BatchFlushSuccess.into(),
-            TracePayload::CdcRowReceived { .. } => TestEvent::CdcRowReceived.into(),
-            TracePayload::CdcRowRouted { .. } => TestEvent::CdcRowRouted.into(),
-            TracePayload::IndexBatchResponse { .. } => TestEvent::IndexBatchResponse.into(),
-            TracePayload::Unknown => "Unknown",
-        }
+    pub fn discriminant(&self) -> TestEvent {
+        TestEvent::from(&self.payload)
     }
 }
 
@@ -293,7 +279,7 @@ impl TraceSequenceStep {
             }
         }
 
-        event.name() == <TestEvent as Into<&str>>::into(self.event)
+        event.discriminant() == self.event
     }
 
     fn describe(&self) -> String {
