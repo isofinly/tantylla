@@ -1,6 +1,7 @@
 use crate::cluster::TestCluster;
 use crate::trace::TraceSequence;
 use anyhow::{Context, Result, ensure};
+use futures::FutureExt;
 use serde_json::Value;
 use tantylla_common::tracing::events::{TestEvent, TestEventSource};
 use tokio::time::{Duration, sleep};
@@ -19,7 +20,7 @@ async fn e2e_cdc_to_gateway_search() -> Result<()> {
         .await
         .context("building test cluster")?;
 
-    let test_result = async {
+    let test_result = std::panic::AssertUnwindSafe(async {
         let trace_collector = cluster
             .trace_collector()
             .context("fetching trace collector")?;
@@ -183,7 +184,8 @@ async fn e2e_cdc_to_gateway_search() -> Result<()> {
         tracing::info!(query = ?query_matched, "Gateway query matched");
 
         Ok(())
-    }
+    })
+    .catch_unwind()
     .await;
 
     cluster
@@ -191,7 +193,10 @@ async fn e2e_cdc_to_gateway_search() -> Result<()> {
         .await
         .context("shutting down test cluster")?;
 
-    test_result
+    match test_result {
+        Ok(result) => result,
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
 }
 
 #[tokio::test]
@@ -207,7 +212,7 @@ async fn e2e_gateway_failure_on_missing_node() -> Result<()> {
         .await
         .context("building test cluster")?;
 
-    let test_result = async {
+    let test_result = std::panic::AssertUnwindSafe(async {
         let trace_collector = cluster
             .trace_collector()
             .context("fetching trace collector")?;
@@ -261,7 +266,8 @@ async fn e2e_gateway_failure_on_missing_node() -> Result<()> {
             .await?;
 
         Ok(())
-    }
+    })
+    .catch_unwind()
     .await;
 
     cluster
@@ -269,5 +275,8 @@ async fn e2e_gateway_failure_on_missing_node() -> Result<()> {
         .await
         .context("shutting down test cluster")?;
 
-    test_result
+    match test_result {
+        Ok(result) => result,
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
 }
