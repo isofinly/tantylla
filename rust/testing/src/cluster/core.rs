@@ -204,11 +204,19 @@ impl TestCluster {
     }
 
     pub fn gateway(&self) -> anyhow::Result<GatewayClient> {
-        let addr = self.gateway_addrs().first().context("no gateway addresses available")?;
+        let addr = self
+            .gateway_addrs()
+            .first()
+            .context("no gateway addresses available")?;
         Ok(GatewayClient::new(addr))
     }
 
-    pub async fn insert_document(&self, doc_id: &str, title: &str, body: &str) -> anyhow::Result<()> {
+    pub async fn insert_document(
+        &self,
+        doc_id: &str,
+        title: &str,
+        body: &str,
+    ) -> anyhow::Result<()> {
         let insert_cql = format!(
             "INSERT INTO {}.{} (doc_id, title, body) VALUES (?, ?, ?)",
             self.keyspace(),
@@ -225,9 +233,13 @@ impl TestCluster {
     where
         F: for<'a> FnOnce(&'a mut TestCluster) -> BoxFuture<'a, anyhow::Result<()>>,
     {
-        let result = std::panic::AssertUnwindSafe(f(&mut self)).catch_unwind().await;
+        let result = std::panic::AssertUnwindSafe(f(&mut self))
+            .catch_unwind()
+            .await;
 
-        self.shutdown().await.context("shutting down cluster in scoped scope")?;
+        self.shutdown()
+            .await
+            .context("shutting down cluster in scoped scope")?;
 
         match result {
             Ok(res) => res,

@@ -33,7 +33,8 @@ impl GatewayClient {
     }
 
     pub async fn search(&self, req: &SearchRequest) -> Result<SearchResponse> {
-        let response = self.client
+        let response = self
+            .client
             .post(format!("{}/api/v1/search", self.base_url))
             .json(req)
             .send()
@@ -41,7 +42,10 @@ impl GatewayClient {
             .context("sending gateway search request")?;
 
         let status = response.status();
-        let body = response.text().await.context("reading gateway response body")?;
+        let body = response
+            .text()
+            .await
+            .context("reading gateway response body")?;
 
         if !status.is_success() {
             bail!("gateway returned error status {}: {}", status, body);
