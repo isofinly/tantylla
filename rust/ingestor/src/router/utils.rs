@@ -192,37 +192,56 @@ fn cql_to_json(val: &CqlValue) -> Value {
     }
 }
 
-pub(super) async fn get_partition_key_columns(
+pub(super) struct TableKeyInfo {
+    pub partition_key_columns: Vec<String>,
+    pub full_primary_key_columns: Vec<String>,
+}
+
+pub(super) async fn get_table_key_info(
     session: std::sync::Arc<Session>,
-    keyspace: &String,
-    table: &String,
-) -> Result<Vec<String>> {
+    keyspace: &str,
+    table: &str,
+) -> Result<TableKeyInfo> {
     let query = r#"
-            SELECT column_name, position
+            SELECT column_name, position, kind
             FROM system_schema.columns
             WHERE keyspace_name = ?
             AND table_name = ?
-            AND kind = 'partition_key'
+            AND kind IN ('partition_key', 'clustering')
             ALLOW FILTERING
         "#;
     let prepared_statement = session.prepare(query).await?;
     let result = session
         .execute_unpaged(&prepared_statement, (keyspace, table))
         .await?;
-    let rows_result = result.into_rows_result()?;
-    let rows_iter = rows_result.rows::<(String, i32)>()?;
 
-    let mut pk_pairs: Vec<(i32, String)> = Vec::new();
-    for row_res in rows_iter {
-        let (name, pos) = row_res?;
-        pk_pairs.push((pos, name));
+    let rows_result = result.into_rows_result()?;
+
+    let mut partition_keys: Vec<(i32, String)> = Vec::new();
+    let mut clustering_keys: Vec<(i32, String)> = Vec::new();
+
+    for row_res in rows_result.rows::<(String, i32, String)>()? {
+        let (name, pos, kind) = row_res?;
+        if kind == "partition_key" {
+            partition_keys.push((pos, name));
+        } else {
+            clustering_keys.push((pos, name));
+        }
     }
 
-    pk_pairs.sort_by_key(|&(pos, _)| pos);
+    partition_keys.sort_by_key(|k| k.0);
+    clustering_keys.sort_by_key(|k| k.0);
 
-    let pk_names = pk_pairs.into_iter().map(|(_, name)| name).collect();
+    let pk_names: Vec<String> = partition_keys.into_iter().map(|(_, name)| name).collect();
+    let ck_names: Vec<String> = clustering_keys.into_iter().map(|(_, name)| name).collect();
 
-    Ok(pk_names)
+    let mut full_pk = pk_names.clone();
+    full_pk.extend(ck_names);
+
+    Ok(TableKeyInfo {
+        partition_key_columns: pk_names,
+        full_primary_key_columns: full_pk,
+    })
 }
 
 pub(super) fn get_target_node_id(

@@ -20,7 +20,8 @@ use crate::{
 pub(crate) struct Router {
     node_info: AHashMap<usize, String>,
     batch_service: Arc<Service>,
-    pk_columns: Vec<String>,
+    partition_key_columns: Vec<String>,    // For routing to nodes
+    full_primary_key_columns: Vec<String>, // For document ID
     table_name: String,
 }
 
@@ -32,12 +33,13 @@ impl Router {
         session: Arc<Session>,
         batch_service: Arc<Service>,
     ) -> Result<Self> {
-        let pk_columns = utils::get_partition_key_columns(session.clone(), keyspace, table).await?;
+        let key_info = utils::get_table_key_info(session.clone(), keyspace, table).await?;
 
         Ok(Router {
             node_info,
             batch_service,
-            pk_columns,
+            partition_key_columns: key_info.partition_key_columns,
+            full_primary_key_columns: key_info.full_primary_key_columns,
             table_name: format!("{}.{}", keyspace, table),
         })
     }
@@ -54,7 +56,8 @@ impl Router {
             }
         }
 
-        let target_node_id = utils::get_target_node_id(row, &self.pk_columns, self.node_info.len());
+        let target_node_id =
+            utils::get_target_node_id(row, &self.partition_key_columns, self.node_info.len());
         let target_node = self.node_info.get(&target_node_id).unwrap();
 
         let op_type = match row.operation {
@@ -63,11 +66,20 @@ impl Router {
             }
             OperationType::RowDelete | OperationType::PartitionDelete => OpType::Delete,
             // TODO: Not all operations are supported yet
-            _ => return Ok(()),
+            _ => {
+                tracing::debug!(
+                    target: "test_event",
+                    source = %TestEventSource::Ingestor,
+                    event = %TestEvent::CdcRowRouteFailure,
+                    target_node,
+                    error = format!("tried to route: {:?}", row.operation)
+                );
+                return Err(anyhow::anyhow!("Unsupported operation type"));
+            }
         };
 
         let pk_values: Vec<String> = self
-            .pk_columns
+            .full_primary_key_columns
             .iter()
             .map(|col_name| match row.get_value(col_name) {
                 Some(val) => format!("{}", val),

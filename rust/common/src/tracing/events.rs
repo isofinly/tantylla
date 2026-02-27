@@ -95,6 +95,7 @@ pub enum TracePayload {
     CdcRowRouted {
         node_count: usize,
     },
+    CdcRowRouteFailure {},
     IndexBatchResponse {
         processed_count: u32,
         skipped_count: u32,
