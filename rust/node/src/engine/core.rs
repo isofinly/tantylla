@@ -1,5 +1,6 @@
 use std::ops::Bound;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -44,6 +45,7 @@ struct Doc {
     doc: serde_json::Value,
     expires_at: i64,
     writetime: u64,
+    generation: u64,
 }
 
 #[derive(Clone)]
@@ -60,6 +62,7 @@ pub(crate) struct Engine {
     // TODO: Handle it somehow
     /// Map from `String` (_The unique Primary Key of the row_) to the `UncommittedDoc`
     uncommitted_docs: Arc<DashMap<String, Doc>>,
+    current_generation: Arc<AtomicU64>,
 }
 
 impl Engine {
@@ -104,6 +107,7 @@ impl Engine {
             field_expires_at,
             config,
             uncommitted_docs: Arc::new(DashMap::new()),
+            current_generation: Arc::new(AtomicU64::new(0)),
         };
 
         engine.spawn_committer();
@@ -161,11 +165,13 @@ impl Engine {
                         i64::MAX
                     };
 
+                    let generation = self.current_generation.load(Ordering::Acquire);
                     let uncommitted_doc = Doc {
                         id: op.id.clone(),
                         doc: current_doc_json.clone(),
                         writetime: op.writetime,
                         expires_at,
+                        generation,
                     };
 
                     uncommitted.insert(op.id.clone(), uncommitted_doc);
@@ -297,6 +303,7 @@ impl Engine {
         let writer_lock = self.writer.clone();
         let uncommitted = self.uncommitted_docs.clone();
         let interval_duration = Duration::from_secs(self.config.commit_interval_secs);
+        let gen_counter = self.current_generation.clone();
 
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(interval_duration);
@@ -306,11 +313,15 @@ impl Engine {
                 if let Ok(mut writer) = writer_lock.try_write() {
                     match writer.commit() {
                         Ok(opstamp) => {
+                            let committed_gen = gen_counter.fetch_add(1, Ordering::SeqCst);
                             info!("Commit successful. Opstamp: {}", opstamp);
-                            uncommitted.clear();
-                            trace!("Uncommitted cache cleared");
+                            uncommitted.retain(|_, doc| doc.generation > committed_gen);
+                            trace!("Evicted cache entries from generation <= {}", committed_gen);
                         }
-                        Err(e) => error!("Commit failed: {}", e),
+                        Err(e) => {
+                            gen_counter.fetch_sub(1, Ordering::SeqCst);
+                            error!("Commit failed: {}", e)
+                        }
                     }
                 }
                 // Contended, skip commit
@@ -395,6 +406,7 @@ impl Engine {
                     doc: doc_body,
                     writetime,
                     expires_at,
+                    generation: 0,
                 });
             }
         }
