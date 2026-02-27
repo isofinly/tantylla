@@ -56,10 +56,60 @@ message IndexOperation {
 
   // The actual data to index.
   // - For UPSERT: A JSON string representing the row columns.
+  //   Collection columns with delta semantics are excluded from this field
+  //   and instead represented in collection_deltas below.
   // - For DELETE: Empty (we only need the ID to delete).
   // We use string (JSON) for flexibility so the schema can evolve
   // without changing the Proto definition.
   string payload_json = 5;
+
+  // Delta operations for non-frozen collection columns (sets, lists, maps).
+  // ScyllaDB CDC provides per-element add/remove signals rather than the
+  // full collection state. These deltas let the node apply set-theoretic
+  // merge (union, subtract, tombstone-and-replace) instead of wholesale
+  // array replacement.
+  //
+  // Only populated for delta rows (RowInsert, RowUpdate).
+  //
+  // PostImage rows carry the full state in payload_json and leave this empty.
+  repeated CollectionDelta collection_deltas = 6;
+}
+
+// Represents a delta operation on a single non-frozen collection column.
+//
+// ScyllaDB CDC exposes three signals for collection mutations:
+//   1. Added elements   — the column value itself (new elements to union in)
+//   2. Deleted elements  — cdc$deleted_elements_<col> (specific elements to remove)
+//   3. Collection tombstone — cdc$deleted_<col> (clear entire collection before adding)
+//
+// The node applies these in order: tombstone → remove → add.
+message CollectionDelta {
+  // The column name this delta applies to (e.g., "tags").
+  string column = 1;
+
+  // Whether the entire collection was tombstoned (cdc$deleted_<col> = true).
+  // When true, the node clears the existing collection before applying
+  // added_elements. This is the CDC signal for full-collection overwrite
+  // (e.g., `UPDATE t SET tags = {'a','b'} WHERE ...`).
+  bool tombstoned = 2;
+
+  // Elements to add to the collection, as a JSON array.
+  //
+  // For sets/lists: `["elem1", "elem2"]`.
+  //
+  // For maps: a JSON object `{"key1": "val1"}`.
+  //
+  // Empty string means no elements to add.
+  string added_elements_json = 3;
+
+  // Elements to remove from the collection, as a JSON array.
+  //
+  // For sets: `["elem1", "elem2"]` (values to remove).
+  //
+  // For maps: `["key1", "key2"]` (keys to remove).
+  //
+  // Empty string means no elements to remove.
+  string deleted_elements_json = 4;
 }
 
 message IndexBatchResponse {

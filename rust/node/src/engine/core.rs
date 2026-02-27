@@ -13,10 +13,11 @@ use tantivy::schema::{
     FAST, Field, IndexRecordOption, JsonObjectOptions, STORED, STRING, Schema, TextFieldIndexing,
     Value,
 };
-use tantivy::time::ext::NumericalDuration;
 use tantivy::{Document, Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument, Term};
 use tantylla_common::indexer::index_operation::OpType;
-use tantylla_common::indexer::{IndexBatchResponse, IndexOperation, SearchHit, SearchResponse};
+use tantylla_common::indexer::{
+    CollectionDelta, IndexBatchResponse, IndexOperation, SearchHit, SearchResponse,
+};
 use tantylla_common::tracing::events::{TestEvent, TestEventSource};
 use tracing::{debug, error, info, trace, warn};
 
@@ -157,6 +158,10 @@ impl Engine {
 
                     merge_json(&mut current_doc_json, patch_json);
 
+                    if !op.collection_deltas.is_empty() {
+                        apply_collection_deltas(&mut current_doc_json, &op.collection_deltas);
+                    }
+
                     let expires_at = if let Some(ttl) = op.cdc_ttl {
                         let ttl_micros = ttl.saturating_mul(1_000_000).max(0) as u64;
                         let expires_at = op.writetime.saturating_add(ttl_micros);
@@ -202,7 +207,7 @@ impl Engine {
                     if let Some(writetime) = existing.as_ref().map(|d| d.writetime)
                         && writetime >= op.writetime
                     {
-                        warn!("Upsert operation skipped due to newer write time");
+                        warn!("Delete operation skipped due to newer write time");
                         skipped += 1;
                         continue;
                     }
@@ -431,5 +436,268 @@ fn merge_json(a: &mut serde_json::Value, b: serde_json::Value) {
             }
         }
         (a, b) => *a = b,
+    }
+}
+
+/// Applies collection delta operations to the document's collection fields.
+///
+/// Each `CollectionDelta` targets a single column and carries three signals:
+/// - tombstone (clear all)
+/// - deleted elements (remove specific)
+/// - added elements (union in new).
+///
+/// The function modifies `doc` in place.
+fn apply_collection_deltas(doc: &mut serde_json::Value, deltas: &[CollectionDelta]) {
+    let obj = match doc.as_object_mut() {
+        Some(obj) => obj,
+        // Intentionally omitted: handling non-object documents.
+        // Collection deltas only make sense when the document is a JSON object.
+        None => return,
+    };
+
+    for delta in deltas {
+        let existing = obj
+            .entry(&delta.column)
+            .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+
+        let mut elements: Vec<serde_json::Value> = match existing.as_array() {
+            Some(arr) => arr.clone(),
+            // If the existing value is not an array (e.g., first time seeing
+            // this column, or schema changed), start fresh.
+            None => Vec::new(),
+        };
+
+        if delta.tombstoned {
+            elements.clear();
+        }
+
+        if !delta.deleted_elements_json.is_empty()
+            && let Ok(deleted) =
+                serde_json::from_str::<Vec<serde_json::Value>>(&delta.deleted_elements_json)
+        {
+            elements.retain(|elem| !deleted.contains(elem));
+        }
+
+        if !delta.added_elements_json.is_empty()
+            && let Ok(added) =
+                serde_json::from_str::<Vec<serde_json::Value>>(&delta.added_elements_json)
+        {
+            for elem in added {
+                if !elements.contains(&elem) {
+                    elements.push(elem);
+                }
+            }
+        }
+
+        *existing = serde_json::Value::Array(elements);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn delta(column: &str, tombstoned: bool, added: &str, deleted: &str) -> CollectionDelta {
+        CollectionDelta {
+            column: column.to_string(),
+            tombstoned,
+            added_elements_json: added.to_string(),
+            deleted_elements_json: deleted.to_string(),
+        }
+    }
+
+    #[test]
+    fn add_elements_to_empty_collection() {
+        let mut doc = serde_json::json!({});
+        let deltas = vec![delta("tags", false, r#"["a","b"]"#, "")];
+
+        apply_collection_deltas(&mut doc, &deltas);
+
+        assert_eq!(doc["tags"], serde_json::json!(["a", "b"]));
+    }
+
+    #[test]
+    fn add_elements_to_existing_collection() {
+        let mut doc = serde_json::json!({ "tags": ["existing"] });
+        let deltas = vec![delta("tags", false, r#"["new"]"#, "")];
+
+        apply_collection_deltas(&mut doc, &deltas);
+
+        let tags = doc["tags"].as_array().expect("tags should be an array");
+        assert_eq!(tags.len(), 2);
+        assert!(tags.contains(&serde_json::json!("existing")));
+        assert!(tags.contains(&serde_json::json!("new")));
+    }
+
+    #[test]
+    fn add_duplicate_element_is_deduplicated() {
+        let mut doc = serde_json::json!({ "tags": ["a", "b"] });
+        let deltas = vec![delta("tags", false, r#"["b","c"]"#, "")];
+
+        apply_collection_deltas(&mut doc, &deltas);
+
+        let tags = doc["tags"].as_array().expect("tags should be an array");
+        assert_eq!(tags.len(), 3, "duplicate 'b' should not be added twice");
+        assert!(tags.contains(&serde_json::json!("a")));
+        assert!(tags.contains(&serde_json::json!("b")));
+        assert!(tags.contains(&serde_json::json!("c")));
+    }
+
+    #[test]
+    fn remove_elements_from_collection() {
+        let mut doc = serde_json::json!({ "tags": ["a", "b", "c"] });
+        let deltas = vec![delta("tags", false, "", r#"["b"]"#)];
+
+        apply_collection_deltas(&mut doc, &deltas);
+
+        assert_eq!(doc["tags"], serde_json::json!(["a", "c"]));
+    }
+
+    #[test]
+    fn remove_nonexistent_element_is_noop() {
+        let mut doc = serde_json::json!({ "tags": ["a", "b"] });
+        let deltas = vec![delta("tags", false, "", r#"["z"]"#)];
+
+        apply_collection_deltas(&mut doc, &deltas);
+
+        assert_eq!(doc["tags"], serde_json::json!(["a", "b"]));
+    }
+
+    #[test]
+    fn tombstone_clears_collection() {
+        let mut doc = serde_json::json!({ "tags": ["a", "b", "c"] });
+        let deltas = vec![delta("tags", true, "", "")];
+
+        apply_collection_deltas(&mut doc, &deltas);
+
+        assert_eq!(doc["tags"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn tombstone_then_add_is_overwrite() {
+        // This is the CDC pattern for `SET tags = {'new'}`:
+        // tombstoned=true + added=["new"]
+        let mut doc = serde_json::json!({ "tags": ["old1", "old2"] });
+        let deltas = vec![delta("tags", true, r#"["new"]"#, "")];
+
+        apply_collection_deltas(&mut doc, &deltas);
+
+        assert_eq!(doc["tags"], serde_json::json!(["new"]));
+    }
+
+    #[test]
+    fn insert_tombstones_then_adds() {
+        let mut doc = serde_json::json!({});
+        let deltas = vec![delta("tags", true, r#"["premium"]"#, "")];
+
+        apply_collection_deltas(&mut doc, &deltas);
+
+        assert_eq!(doc["tags"], serde_json::json!(["premium"]));
+    }
+
+    #[test]
+    fn multiple_deltas_on_different_columns() {
+        let mut doc = serde_json::json!({ "tags": ["a"], "categories": ["x"] });
+        let deltas = vec![
+            delta("tags", false, r#"["b"]"#, ""),
+            delta("categories", false, "", r#"["x"]"#),
+        ];
+
+        apply_collection_deltas(&mut doc, &deltas);
+
+        assert_eq!(doc["tags"], serde_json::json!(["a", "b"]));
+        assert_eq!(doc["categories"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn multiple_deltas_on_same_column_applied_sequentially() {
+        let mut doc = serde_json::json!({ "tags": ["a", "b"] });
+        let deltas = vec![
+            delta("tags", false, "", r#"["a"]"#),
+            delta("tags", false, r#"["c"]"#, ""),
+        ];
+
+        apply_collection_deltas(&mut doc, &deltas);
+
+        let tags = doc["tags"].as_array().expect("tags should be an array");
+        assert_eq!(tags.len(), 2);
+        assert!(tags.contains(&serde_json::json!("b")));
+        assert!(tags.contains(&serde_json::json!("c")));
+        assert!(!tags.contains(&serde_json::json!("a")));
+    }
+
+    #[test]
+    fn non_object_document_is_noop() {
+        // apply_collection_deltas intentionally skips non-object docs
+        let mut doc = serde_json::json!("just a string");
+        let deltas = vec![delta("tags", false, r#"["a"]"#, "")];
+
+        apply_collection_deltas(&mut doc, &deltas);
+
+        assert_eq!(doc, serde_json::json!("just a string"));
+    }
+
+    #[test]
+    fn empty_deltas_is_noop() {
+        let mut doc = serde_json::json!({ "tags": ["a"] });
+        apply_collection_deltas(&mut doc, &[]);
+        assert_eq!(doc["tags"], serde_json::json!(["a"]));
+    }
+
+    #[test]
+    fn malformed_json_in_added_elements_is_ignored() {
+        let mut doc = serde_json::json!({ "tags": ["a"] });
+        let deltas = vec![delta("tags", false, "not valid json", "")];
+
+        apply_collection_deltas(&mut doc, &deltas);
+
+        // Existing data should be unchanged
+        assert_eq!(doc["tags"], serde_json::json!(["a"]));
+    }
+
+    #[test]
+    fn malformed_json_in_deleted_elements_is_ignored() {
+        let mut doc = serde_json::json!({ "tags": ["a", "b"] });
+        let deltas = vec![delta("tags", false, "", "not valid json")];
+
+        apply_collection_deltas(&mut doc, &deltas);
+
+        assert_eq!(doc["tags"], serde_json::json!(["a", "b"]));
+    }
+
+    #[test]
+    fn existing_non_array_value_starts_fresh() {
+        // If a column was previously a scalar and now gets collection deltas,
+        // we start from an empty vec rather than crashing.
+        let mut doc = serde_json::json!({ "tags": "was_a_string" });
+        let deltas = vec![delta("tags", false, r#"["new"]"#, "")];
+
+        apply_collection_deltas(&mut doc, &deltas);
+
+        assert_eq!(doc["tags"], serde_json::json!(["new"]));
+    }
+
+    #[test]
+    fn merge_json_adds_new_keys() {
+        let mut a = serde_json::json!({ "name": "alice" });
+        let b = serde_json::json!({ "age": 30 });
+        merge_json(&mut a, b);
+        assert_eq!(a, serde_json::json!({ "name": "alice", "age": 30 }));
+    }
+
+    #[test]
+    fn merge_json_overwrites_existing_keys() {
+        let mut a = serde_json::json!({ "name": "alice" });
+        let b = serde_json::json!({ "name": "bob" });
+        merge_json(&mut a, b);
+        assert_eq!(a, serde_json::json!({ "name": "bob" }));
+    }
+
+    #[test]
+    fn merge_json_nested_objects() {
+        let mut a = serde_json::json!({ "meta": { "x": 1 } });
+        let b = serde_json::json!({ "meta": { "y": 2 } });
+        merge_json(&mut a, b);
+        assert_eq!(a, serde_json::json!({ "meta": { "x": 1, "y": 2 } }));
     }
 }

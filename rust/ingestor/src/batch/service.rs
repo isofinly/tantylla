@@ -6,7 +6,7 @@ use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use tantylla_common::{
     indexer::{
-        IndexBatchRequest, IndexBatchResponse, IndexOperation,
+        CollectionDelta, IndexBatchRequest, IndexBatchResponse, IndexOperation,
         index_service_client::IndexServiceClient,
     },
     tracing::events::{TestEvent, TestEventSource},
@@ -35,6 +35,11 @@ pub(crate) struct BatchItem {
     pub writetime: u64,
     pub cdc_ttl: Option<i64>,
     pub payload_json: String,
+    /// Per-column delta operations for non-frozen collection columns.
+    /// Populated only for CDC delta rows (RowInsert, RowUpdate); empty
+    /// for PostImage rows and deletes.
+    #[serde(default)]
+    pub collection_deltas: Vec<CollectionDelta>,
 }
 
 const DEFAULT_FLUSH_INTERVAL: Duration = Duration::from_millis(500);
@@ -160,6 +165,7 @@ impl Service {
                         writetime: batch_item.writetime,
                         cdc_ttl: batch_item.cdc_ttl,
                         payload_json: batch_item.payload_json,
+                        collection_deltas: batch_item.collection_deltas,
                     };
 
                     node_batches

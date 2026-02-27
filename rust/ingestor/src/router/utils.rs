@@ -4,10 +4,93 @@ use bigdecimal::BigDecimal;
 use scylla::{client::session::Session, value::CqlValue};
 use serde_json::{Map, Value};
 use std::hash::Hasher;
+use tantylla_common::indexer::CollectionDelta;
 use twox_hash::XxHash64;
 use uuid::Uuid;
 
-pub(super) fn serialize_row_to_json(
+pub(super) struct SerializedRow {
+    /// JSON payload containing only scalar (non-collection) columns and
+    /// CDC metadata fields.
+    pub payload_json: String,
+
+    /// Per-column delta operations for non-frozen collection columns.
+    /// Empty when the row has no collection columns or when processing
+    /// a PostImage (which carries the full state in `payload_json`).
+    pub collection_deltas: Vec<CollectionDelta>,
+}
+
+/// Serializes a CDC delta row into a JSON payload and collection deltas.
+pub(super) fn serialize_cdc_row(
+    row: &scylla_cdc::consumer::CDCRow<'_>,
+) -> anyhow::Result<SerializedRow> {
+    let mut doc = Map::new();
+    let mut collection_deltas = Vec::new();
+
+    doc.insert(
+        "_cdc_stream_id".to_string(),
+        Value::String(row.stream_id.to_string()),
+    );
+    doc.insert("_cdc_time".to_string(), Value::String(row.time.to_string()));
+    doc.insert(
+        "_cdc_batch_seq".to_string(),
+        Value::Number(row.batch_seq_no.into()),
+    );
+
+    if let Some(ttl) = row.ttl {
+        doc.insert("_cdc_ttl".to_string(), Value::Number(ttl.into()));
+    }
+
+    for column_name in row.get_non_cdc_column_names() {
+        if row.collection_exists(column_name) {
+            let tombstoned = row.is_value_deleted(column_name);
+
+            // Added elements: the column value itself (only new/added elements)
+            let added_elements_json = match row.get_value(column_name) {
+                Some(cql_value) => {
+                    let json_val = cql_to_json(cql_value);
+                    serde_json::to_string(&json_val).unwrap_or_default()
+                }
+                None => String::new(),
+            };
+
+            // Deleted elements: specific elements removed from the collection
+            let deleted_elements = row.get_deleted_elements(column_name);
+            let deleted_elements_json = if deleted_elements.is_empty() {
+                String::new()
+            } else {
+                let json_arr: Vec<Value> = deleted_elements.iter().map(cql_to_json).collect();
+                serde_json::to_string(&json_arr).unwrap_or_default()
+            };
+
+            if tombstoned || !added_elements_json.is_empty() || !deleted_elements_json.is_empty() {
+                collection_deltas.push(CollectionDelta {
+                    column: column_name.to_string(),
+                    tombstoned,
+                    added_elements_json,
+                    deleted_elements_json,
+                });
+            }
+
+            continue;
+        }
+
+        if let Some(cql_value) = row.get_value(column_name) {
+            let json_value = cql_to_json(cql_value);
+            doc.insert(column_name.to_string(), json_value);
+        }
+    }
+
+    Ok(SerializedRow {
+        payload_json: serde_json::to_string(&doc)?,
+        collection_deltas,
+    })
+}
+
+/// Serializes a PostImage CDC row into a JSON payload.
+///
+/// PostImage rows contain the full row state after the write, so collection
+/// columns are included directly in the payload (no delta metadata needed).
+pub(super) fn serialize_postimage_to_json(
     row: &scylla_cdc::consumer::CDCRow<'_>,
 ) -> anyhow::Result<String> {
     let mut doc = Map::new();
@@ -59,7 +142,7 @@ fn cql_to_json(val: &CqlValue) -> Value {
         }
         CqlValue::Double(f) => serde_json::Number::from_f64(*f)
             .map(Value::Number)
-            .unwrap_or(Value::Null), // Handle NaN/Infinite
+            .unwrap_or(Value::Null), // TODO: Handle NaN/Infinite
         CqlValue::Float(f) => serde_json::Number::from_f64(*f as f64)
             .map(Value::Number)
             .unwrap_or(Value::Null),
@@ -87,7 +170,7 @@ fn cql_to_json(val: &CqlValue) -> Value {
             let mut map = serde_json::Map::new();
             for (name, value_opt) in fields {
                 let val = match value_opt {
-                    Some(v) => cql_to_json(v), // Recursion here
+                    Some(v) => cql_to_json(v),
                     None => Value::Null,
                 };
                 map.insert(name.clone(), val);
@@ -142,7 +225,6 @@ pub(super) async fn get_partition_key_columns(
     Ok(pk_names)
 }
 
-// TODO: Improve this for better locality
 pub(super) fn get_target_node_id(
     row: &scylla_cdc::consumer::CDCRow<'_>,
     pk_names: &Vec<String>,
