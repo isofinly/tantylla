@@ -90,10 +90,17 @@ impl Router {
 
         let writetime = utils::extract_writetime_from_timeuuid(row.time)?;
         let cdc_ttl = row.ttl;
-        let payload_json = if matches!(op_type, OpType::Upsert) {
-            utils::serialize_row_to_json(row)?
-        } else {
-            String::new()
+
+        let (payload_json, collection_deltas) = match op_type {
+            OpType::Upsert if matches!(row.operation, OperationType::PostImage) => {
+                let json = utils::serialize_postimage_to_json(row)?;
+                (json, Vec::new())
+            }
+            OpType::Upsert => {
+                let serialized = utils::serialize_cdc_row(row)?;
+                (serialized.payload_json, serialized.collection_deltas)
+            }
+            _ => (String::new(), Vec::new()),
         };
 
         let batch_item = BatchItem {
@@ -103,6 +110,7 @@ impl Router {
             writetime,
             cdc_ttl,
             payload_json: payload_json.clone(),
+            collection_deltas,
         };
 
         let batch_item_json = serde_json::to_string(&batch_item)?;

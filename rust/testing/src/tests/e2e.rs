@@ -255,7 +255,6 @@ async fn e2e_cdc_set_overwrite_indexes_new_label() -> Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "Known issue 004"]
 async fn e2e_cdc_set_element_removal_updates_search_index() -> Result<()> {
     let _ = tracing_subscriber::fmt()
         .with_env_filter("info")
@@ -342,7 +341,6 @@ async fn e2e_cdc_set_element_removal_updates_search_index() -> Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "Known issue 004"]
 async fn e2e_cdc_set_addition_indexes_added_label() -> Result<()> {
     let _ = tracing_subscriber::fmt()
         .with_env_filter("info")
@@ -355,7 +353,7 @@ async fn e2e_cdc_set_addition_indexes_added_label() -> Result<()> {
             title text,\
             tags set<text>,\
             updated_at timestamp\
-        ) WITH cdc = {'enabled': true, 'postimage': true};",
+        ) WITH cdc = {'enabled': true};",
     );
 
     let cluster = TestCluster::builder()
