@@ -1,11 +1,16 @@
+use anyhow::Context;
 use clap::Parser;
 use scylla::client::session_builder::SessionBuilder;
 use std::{
     net::SocketAddr,
     sync::{Arc, OnceLock},
-    time::SystemTime,
+    time::{Duration, SystemTime},
 };
-use tantylla_common::logger;
+use tantylla_common::tracing::layer::TestEventLayer;
+use tantylla_common::{
+    logger,
+    tracing::events::{TestEvent, TestEventSource},
+};
 use tokio::time;
 use tracing::{error, info};
 
@@ -77,6 +82,10 @@ struct Args {
         help = "Interval between polls in milliseconds"
     )]
     sleep_interval: u64,
+
+    #[cfg(debug_assertions)]
+    #[arg(long, help = "UDP port for debug test events")]
+    test_event_port: Option<u16>,
 }
 
 pub(crate) struct AccessPair {
@@ -90,11 +99,28 @@ static GLOBAL_CONFIG: OnceLock<AccessPair> = OnceLock::new();
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
-    logger::init_logger_with_config(logger::LoggerConfig {
-        level: "debug".to_string(),
-        file_path: None,
-        file_level: "info".to_string(),
-    });
+    #[cfg(debug_assertions)]
+    let test_event_port = args.test_event_port;
+    #[cfg(not(debug_assertions))]
+    let test_event_port: Option<u16> = None;
+
+    let test_layer = if let Some(port) = test_event_port {
+        Some(
+            Box::new(TestEventLayer::connect(port).context("connecting test event layer")?)
+                as Box<_>,
+        )
+    } else {
+        None
+    };
+
+    logger::init_logger_with_config_and_layer(
+        logger::LoggerConfig {
+            level: "debug".to_string(),
+            file_path: None,
+            file_level: "info".to_string(),
+        },
+        test_layer,
+    );
 
     info!("Connecting to ScyllaDB at {:?}...", &args.scylla_uri);
     let scylla_uris: Vec<SocketAddr> = args
@@ -130,6 +156,13 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    tracing::debug!(
+        target: "test_event",
+        source = %TestEventSource::Ingestor,
+        event = %TestEvent::Startup,
+        table = format!("{}.{}", keyspace, table)
+    );
+
     if GLOBAL_CONFIG
         .set(AccessPair {
             keyspace: keyspace.to_string(),
@@ -140,7 +173,7 @@ async fn main() -> anyhow::Result<()> {
         return Err(anyhow::anyhow!("Failed to set global configuration"));
     }
 
-    let batch_service = Service::default();
+    let batch_service = Service::new(format!("{}.{}", keyspace, table));
 
     let router = Arc::new(
         router::core::Router::new(node_info, &keyspace, &table, session.clone(), batch_service)
@@ -152,25 +185,33 @@ async fn main() -> anyhow::Result<()> {
     // TODO: Update builder params for persistent CDC consumption
     // TODO: Create unique builder for each keyspace and table instead of a single instance
 
-    let last_checkpoint_offset = Checkpointer::get_last_read_offset()?.unwrap_or(
-        SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap(),
-    );
+    let last_checkpoint_offset = match Checkpointer::get_last_read_offset()? {
+        Some(offset) => offset,
+        None => {
+            let mut offset = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .context("reading system time")?;
+            // In test mode, start slightly earlier to avoid missing early writes.
+            if test_event_port.is_some() {
+                offset = offset.saturating_sub(Duration::from_secs(2));
+            }
+            offset
+        }
+    };
 
-    let (mut reader, handle) =
-        scylla_cdc::log_reader::CDCLogReaderBuilder::new()
-            .session(session.clone())
-            .keyspace(keyspace.as_str())
-            .table_name(table.as_str())
-            .consumer_factory(factory)
-            .safety_interval(time::Duration::from_millis(args.safety_interval))
-            .sleep_interval(time::Duration::from_millis(args.sleep_interval))
-            .start_timestamp(chrono::Duration::from_std(last_checkpoint_offset).expect(
-                "Incorrect checkpoint value (duration). Supposedly from checkpointer read.",
-            ))
-            .build()
-            .await?;
+    let (mut reader, handle) = scylla_cdc::log_reader::CDCLogReaderBuilder::new()
+        .session(session.clone())
+        .keyspace(keyspace.as_str())
+        .table_name(table.as_str())
+        .consumer_factory(factory)
+        .safety_interval(time::Duration::from_millis(args.safety_interval))
+        .sleep_interval(time::Duration::from_millis(args.sleep_interval))
+        .start_timestamp(
+            chrono::Duration::from_std(last_checkpoint_offset)
+                .context("converting checkpoint offset")?,
+        )
+        .build()
+        .await?;
 
     info!("Starting CDC Log Reader for {}.{}", keyspace, table);
     tokio::select! {

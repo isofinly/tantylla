@@ -33,7 +33,7 @@ impl Checkpointer {
             path.file_name().unwrap().to_string_lossy()
         ));
 
-        let old_content = match fs::read_to_string(&path) {
+        let old_content = match fs::read_to_string(path) {
             Ok(content) => {
                 let parts: Vec<String> = content
                     .split('\t')
@@ -59,7 +59,7 @@ impl Checkpointer {
             }
         };
 
-        if old_content.len() == 0 || (old_content[0] == keyspace && old_content[1] == table) {
+        if old_content.is_empty() || (old_content[0] == keyspace && old_content[1] == table) {
             let new_content = format!("{}\t{}\t{}\n", keyspace, table, timestamp_micro);
             let mut file = File::create(&temp_path)?;
             file.write_all(new_content.as_bytes())?;

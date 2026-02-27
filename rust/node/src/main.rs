@@ -1,4 +1,7 @@
+use anyhow::Context;
 use clap::Parser;
+use tantylla_common::tracing::events::{TestEvent, TestEventSource};
+use tantylla_common::tracing::layer::TestEventLayer;
 use tantylla_common::{indexer::index_service_server::IndexServiceServer, logger};
 use tonic::transport::Server;
 use tracing::info;
@@ -20,23 +23,46 @@ struct Args {
     /// Commit interval in seconds (documents become visible after this time)
     #[arg(long, default_value = "5")]
     commit_interval_secs: u64,
+
+    #[cfg(debug_assertions)]
+    #[arg(long, help = "UDP port for debug test events")]
+    test_event_port: Option<u16>,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
-    let _guard = logger::init_logger_with_config(logger::LoggerConfig {
-        level: "debug".to_string(),
-        file_path: None,
-        file_level: "info".to_string(),
-    });
+    #[cfg(debug_assertions)]
+    let test_event_port = args.test_event_port;
+    #[cfg(not(debug_assertions))]
+    let test_event_port: Option<u16> = None;
+
+    let test_layer = if let Some(port) = test_event_port {
+        Some(
+            Box::new(TestEventLayer::connect(port).context("connecting test event layer")?)
+                as Box<_>,
+        )
+    } else {
+        None
+    };
+
+    let _guard = logger::init_logger_with_config_and_layer(
+        logger::LoggerConfig {
+            level: "debug".to_string(),
+            file_path: None,
+            file_level: "info".to_string(),
+        },
+        test_layer,
+    );
 
     let addr = format!("{}:{}", args.address, args.port).parse().unwrap();
 
     let config = AdaptiveConfig {
         commit_interval_secs: args.commit_interval_secs,
     };
+
+    tracing::debug!(target: "test_event", source = %TestEventSource::Node, event = %TestEvent::Startup, port = args.port);
 
     let svc = IndexServiceService::new(format!("./index-{}", args.port), config)?;
 

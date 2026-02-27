@@ -5,7 +5,10 @@ use anyhow::Result;
 use scylla::client::session::Session;
 use scylla_cdc::consumer::OperationType;
 
-use tantylla_common::indexer::index_operation::OpType;
+use tantylla_common::{
+    indexer::index_operation::OpType,
+    tracing::events::{TestEvent, TestEventSource},
+};
 use tracing::debug;
 
 use crate::{
@@ -18,6 +21,7 @@ pub(crate) struct Router {
     node_info: AHashMap<usize, String>,
     batch_service: Service,
     pk_columns: Vec<String>,
+    table_name: String,
 }
 
 impl Router {
@@ -28,13 +32,13 @@ impl Router {
         session: Arc<Session>,
         batch_service: Service,
     ) -> Result<Self> {
-        let pk_columns =
-            utils::get_partition_key_columns(session.clone(), &keyspace, &table).await?;
+        let pk_columns = utils::get_partition_key_columns(session.clone(), keyspace, table).await?;
 
         Ok(Router {
             node_info,
             batch_service,
             pk_columns,
+            table_name: format!("{}.{}", keyspace, table),
         })
     }
 
@@ -54,7 +58,9 @@ impl Router {
         let target_node = self.node_info.get(&target_node_id).unwrap();
 
         let op_type = match row.operation {
-            OperationType::RowInsert | OperationType::RowUpdate => OpType::Upsert,
+            OperationType::RowInsert | OperationType::RowUpdate | OperationType::PostImage => {
+                OpType::Upsert
+            }
             OperationType::RowDelete | OperationType::PartitionDelete => OpType::Delete,
             // TODO: Not all operations are supported yet
             _ => return Ok(()),
@@ -71,6 +77,17 @@ impl Router {
 
         let id = pk_values.join(":");
 
+        tracing::debug!(
+            target: "test_event",
+            source = %TestEventSource::Ingestor,
+            event = %TestEvent::CdcRowRouted,
+            node_count = self.node_info.len(),
+            table = self.table_name,
+            id,
+            op = format!("{:?}", op_type),
+            target_node = target_node
+        );
+
         let writetime = utils::extract_writetime_from_timeuuid(row.time)?;
         let cdc_ttl = row.ttl;
         let payload_json = if matches!(op_type, OpType::Upsert) {
@@ -81,7 +98,7 @@ impl Router {
 
         let batch_item = BatchItem {
             target_node: target_node.clone(),
-            id,
+            id: id.clone(),
             op_type: op_type as i32,
             writetime,
             cdc_ttl,
@@ -95,7 +112,18 @@ impl Router {
         // TODO: Maybe implement a retry mechanism to try again?
         match self.batch_service.add(batch_item_json).await {
             Ok(_) => Ok(()),
-            Err(e) => Err(anyhow::anyhow!("Failed to add batch item: {}", e)),
+            Err(e) => {
+                tracing::debug!(
+                    target: "test_event",
+                    source = %TestEventSource::Ingestor,
+                    event = %TestEvent::BatchAddFailure,
+                    table = self.table_name,
+                    id,
+                    target_node,
+                    error = e.to_string()
+                );
+                Err(anyhow::anyhow!("Failed to add batch item: {}", e))
+            }
         }
     }
 }

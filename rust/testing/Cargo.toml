@@ -1,0 +1,22 @@
+[package]
+name = "tantylla-integration"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+anyhow = "1.0"
+tokio = { version = "1.47", features = ["full"] }
+scylla = "1.3"
+reqwest = { version = "0.12", features = ["json"] }
+uuid = { version = "1.10", features = ["v4"] }
+rand = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+futures = "0.3"
+portpicker = "0.1"
+tempfile = "3.10"
+nix = { version = "0.29", features = ["signal"] }
+tantylla-common = { path = "../common" }
