@@ -12,6 +12,7 @@ use tantivy::schema::{
     FAST, Field, IndexRecordOption, JsonObjectOptions, STORED, STRING, Schema, TextFieldIndexing,
     Value,
 };
+use tantivy::time::ext::NumericalDuration;
 use tantivy::{Document, Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument, Term};
 use tantylla_common::indexer::index_operation::OpType;
 use tantylla_common::indexer::{IndexBatchResponse, IndexOperation, SearchHit, SearchResponse};
@@ -229,12 +230,12 @@ impl Engine {
 
         let searcher = self.reader.searcher();
 
-        let now = now_micros();
+        let start_micros = now_micros();
 
         let query_parser = QueryParser::for_index(&self.index, vec![self.field_doc]);
         let query = query_parser.parse_query(query_str)?;
 
-        let now_term = Term::from_field_i64(self.field_expires_at, now);
+        let now_term = Term::from_field_i64(self.field_expires_at, start_micros);
 
         let expiration_query = RangeQuery::new(Bound::Excluded(now_term), Bound::Unbounded);
         let combined_query = BooleanQuery::new(vec![
@@ -283,10 +284,12 @@ impl Engine {
             });
         }
 
+        let time_delta_micros = now_micros() - start_micros;
+
         Ok(SearchResponse {
             hits,
             total_hits: total_hits as u64,
-            duration_ms: 0,
+            duration_ms: time_delta_micros as u64,
         })
     }
 
