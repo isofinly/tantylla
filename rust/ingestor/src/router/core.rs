@@ -19,7 +19,7 @@ use crate::{
 #[derive(Debug)]
 pub(crate) struct Router {
     node_info: AHashMap<usize, String>,
-    batch_service: Service,
+    batch_service: Arc<Service>,
     pk_columns: Vec<String>,
     table_name: String,
 }
@@ -30,7 +30,7 @@ impl Router {
         keyspace: &String,
         table: &String,
         session: Arc<Session>,
-        batch_service: Service,
+        batch_service: Arc<Service>,
     ) -> Result<Self> {
         let pk_columns = utils::get_partition_key_columns(session.clone(), keyspace, table).await?;
 
