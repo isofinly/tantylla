@@ -83,7 +83,7 @@ async fn e2e_cdc_to_gateway_search() -> Result<()> {
 
                 let gateway = cluster.gateway()?;
                 let (response, query) = gateway
-                    .search_until_hits(&["document.title:hello", "title:hello", "hello"], 20)
+                    .search_until_hits(&["document.title:hello"], 20)
                     .await?;
 
                 tracing::info!(
@@ -226,7 +226,7 @@ async fn e2e_cdc_set_overwrite_indexes_new_label() -> Result<()> {
 
                 let gateway = cluster.gateway().context("building gateway client")?;
                 gateway
-                    .search_until_hits(&["document.tags:legacy", "tags:legacy", "legacy"], 20)
+                    .search_until_hits(&["document.tags:legacy"], 20)
                     .await
                     .context("waiting for initial label to become searchable")?;
 
@@ -243,7 +243,7 @@ async fn e2e_cdc_set_overwrite_indexes_new_label() -> Result<()> {
                     .context("overwriting labels in non-frozen collection")?;
 
                 gateway
-                    .search_until_hits(&["document.tags:overridden", "tags:overridden", "overridden"], 20)
+                    .search_until_hits(&["document.tags:overridden"], 20)
                     .await
                     .context("waiting for overridden label to become searchable")?;
 
@@ -298,7 +298,7 @@ async fn e2e_cdc_set_element_removal_updates_search_index() -> Result<()> {
 
                 let gateway = cluster.gateway().context("building gateway client")?;
                 gateway
-                    .search_until_hits(&["document.tags:premium", "tags:premium", "premium"], 20)
+                    .search_until_hits(&["document.tags:premium"], 20)
                     .await
                     .context("waiting for initial premium tag to become searchable")?;
 
@@ -355,7 +355,7 @@ async fn e2e_cdc_set_addition_indexes_added_label() -> Result<()> {
             title text,\
             tags set<text>,\
             updated_at timestamp\
-        ) WITH cdc = {'enabled': true};",
+        ) WITH cdc = {'enabled': true, 'postimage': true};",
     );
 
     let cluster = TestCluster::builder()
@@ -385,7 +385,7 @@ async fn e2e_cdc_set_addition_indexes_added_label() -> Result<()> {
 
                 let gateway = cluster.gateway().context("building gateway client")?;
                 gateway
-                    .search_until_hits(&["document.tags:legacy", "tags:legacy", "legacy"], 20)
+                    .search_until_hits(&["document.tags:legacy"], 20)
                     .await
                     .context("waiting for initial label to become searchable")?;
 
@@ -485,7 +485,7 @@ async fn e2e_row_delete_removes_single_clustering_row() -> Result<()> {
 
                 let gateway = cluster.gateway().context("building gateway client")?;
                 gateway
-                    .search_until_hits(&["document.title:issue_005_delete", "issue_005_delete"], 20)
+                    .search_until_hits(&["document.title:issue_005_delete"], 20)
                     .await
                     .context("waiting for delete candidate to become searchable")?;
 
@@ -588,13 +588,7 @@ async fn e2e_range_delete_removes_rows_within_bounds() -> Result<()> {
 
                 let gateway = cluster.gateway().context("building gateway client")?;
                 gateway
-                    .search_until_hits(
-                        &[
-                            "document.title:issue_005_range_middle",
-                            "issue_005_range_middle",
-                        ],
-                        20,
-                    )
+                    .search_until_hits(&["document.title:issue_005_range_middle"], 20)
                     .await
                     .context("waiting for middle row to become searchable")?;
 
@@ -678,7 +672,7 @@ async fn e2e_partition_key_delete_removes_single_primary_key_row() -> Result<()>
 
                 let gateway = cluster.gateway().context("building gateway client")?;
                 gateway
-                    .search_until_hits(&["document.title:issue_006_single", "issue_006_single"], 20)
+                    .search_until_hits(&["document.title:issue_006_single"], 20)
                     .await
                     .context("waiting for inserted row to become searchable")?;
 
@@ -770,13 +764,7 @@ async fn e2e_partition_delete_removes_all_rows_for_partition() -> Result<()> {
 
                 let gateway = cluster.gateway().context("building gateway client")?;
                 gateway
-                    .search_until_hits(
-                        &[
-                            "document.title:issue_006_partition_a",
-                            "issue_006_partition_a",
-                        ],
-                        20,
-                    )
+                    .search_until_hits(&["document.title:issue_006_partition_a"], 20)
                     .await
                     .context("waiting for partition fixture rows to become searchable")?;
 
