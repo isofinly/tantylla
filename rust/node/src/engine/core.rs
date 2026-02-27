@@ -325,7 +325,7 @@ impl Engine {
                 interval.tick().await;
                 let now = now_micros();
                 trace!("Pruning started");
-                if let Ok(mut writer) = writer_lock.write() {
+                if let Ok(mut writer) = writer_lock.try_write() {
                     let now_term = Term::from_field_i64(field_expires_at, now);
                     let prune_query = RangeQuery::new(Bound::Unbounded, Bound::Included(now_term));
                     match writer.delete_query(Box::new(prune_query)) {
@@ -339,6 +339,7 @@ impl Engine {
                         Err(e) => error!("Pruning failed: {}", e),
                     }
                 }
+                // Contended, skip pruning
             }
         });
     }
