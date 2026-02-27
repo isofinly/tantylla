@@ -6,7 +6,7 @@ use std::{
     sync::{Arc, OnceLock},
     time::{Duration, SystemTime},
 };
-use tantylla_common::tracing::layer::TestEventLayer;
+use tantylla_common::{WorkerGuard, tracing::layer::TestEventLayer};
 use tantylla_common::{
     logger,
     tracing::events::{TestEvent, TestEventSource},
@@ -94,6 +94,7 @@ pub(crate) struct AccessPair {
 }
 
 static GLOBAL_CONFIG: OnceLock<AccessPair> = OnceLock::new();
+static LOGGER_GUARD: OnceLock<WorkerGuard> = OnceLock::new();
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -113,14 +114,18 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
-    logger::init_logger_with_config_and_layer(
+    if let Some(guard) = logger::init_logger_with_config_and_layer(
         logger::LoggerConfig {
             level: "debug".to_string(),
             file_path: None,
             file_level: "info".to_string(),
         },
         test_layer,
-    );
+    ) {
+        LOGGER_GUARD
+            .set(guard)
+            .expect("Failed to set static global guard");
+    }
 
     info!("Connecting to ScyllaDB at {:?}...", &args.scylla_uri);
     let scylla_uris: Vec<SocketAddr> = args
@@ -173,11 +178,17 @@ async fn main() -> anyhow::Result<()> {
         return Err(anyhow::anyhow!("Failed to set global configuration"));
     }
 
-    let batch_service = Service::new(format!("{}.{}", keyspace, table));
+    let batch_service = Arc::new(Service::new(format!("{}.{}", keyspace, table)));
 
     let router = Arc::new(
-        router::core::Router::new(node_info, &keyspace, &table, session.clone(), batch_service)
-            .await?,
+        router::core::Router::new(
+            node_info,
+            &keyspace,
+            &table,
+            session.clone(),
+            batch_service.clone(),
+        )
+        .await?,
     );
     let factory = Arc::new(cdc::consumer::ConsumerFactory::new(router));
 
@@ -217,6 +228,10 @@ async fn main() -> anyhow::Result<()> {
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {
             info!("Shutdown signal received, stopping...");
+            match batch_service.flush().await {
+                Ok(_) => info!("Batch service flushed successfully."),
+                Err(e) => error!("Failed to flush batch service: {:?}", e),
+            };
             reader.stop();
         }
         result = handle => {
