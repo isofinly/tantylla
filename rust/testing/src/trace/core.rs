@@ -273,10 +273,10 @@ fn match_sequence(events: &[TraceEvent], sequence: &TraceSequence) -> Option<Vec
 
 impl TraceSequenceStep {
     fn matches(&self, event: &TraceEvent) -> bool {
-        if let Some(source) = &self.source {
-            if source != &event.source {
-                return false;
-            }
+        if let Some(source) = &self.source
+            && source != &event.source
+        {
+            return false;
         }
 
         event.discriminant() == self.event
