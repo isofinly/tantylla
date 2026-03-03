@@ -130,7 +130,7 @@ impl Router {
             }
             RoutingAction::RangeDeleteStart => return self.handle_range_delete_start(row).await,
             RoutingAction::RangeDeleteEnd => return self.handle_range_delete_end(row).await,
-            RoutingAction::Forward { op_type } => {
+            RoutingAction::Forward { op_type: _ } => {
                 // handled below
             }
         }

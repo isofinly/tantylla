@@ -36,13 +36,13 @@ pub(crate) struct BatchItem {
     pub cdc_ttl: Option<i64>,
     pub payload_json: String,
     /// Per-column delta operations for non-frozen collection columns.
-    /// Populated only for CDC delta rows (RowInsert, RowUpdate); empty
-    /// for PostImage rows and deletes.
+    /// Populated only for CDC delta rows (RowInsert, RowUpdate);
+    /// empty for PostImage rows and deletes.
     #[serde(default)]
     pub collection_deltas: Vec<CollectionDelta>,
     /// The partition key portion of the document ID (e.g., "user-123").
-    /// Used by the node to index documents by partition for efficient
-    /// partition-level deletes and range delete resolution.
+    /// Used by the node to index and operate on partition-level deletes
+    /// and range delete resolution.
     #[serde(default)]
     pub partition_key: Option<String>,
 }
@@ -138,8 +138,15 @@ impl Service {
     }
 
     /// Flushes the current buffer to target nodes.
-    /// Returns Err if any batch fails completely after all retries,
-    /// enabling backpressure - caller should stop CDC ingestion on failure.
+    ///
+    /// The checkpoint is committed **only after every node batch in this flush
+    /// cycle has been delivered successfully**.
+    ///
+    /// If any node fails (fully or partially), no checkpoint commit is issued
+    /// for this cycle and the caller receives `Err` and backpressure is activated.
+    ///
+    /// The committed writetime is the **global maximum** across all per-node
+    /// batches.
     pub(crate) async fn flush(&self) -> Result<(), BatchFlushError> {
         let items_to_process: Vec<String> = {
             let mut locked_buffer = self.buffer.lock().unwrap();
@@ -186,6 +193,7 @@ impl Service {
             }
         }
 
+        let mut node_max_writetimes: Vec<u64> = Vec::new();
         let mut failed_nodes: Vec<String> = Vec::new();
 
         for (target_node, operations) in node_batches {
@@ -198,15 +206,25 @@ impl Service {
                     if total_processed < expected_count {
                         error!(
                             "Node {}: Batch partially indexed. Expected {} operations, \
-                             processed {} (skipped {}). Success flag: {}",
+                             processed {} (skipped {}). Treating as failure to preserve \
+                             checkpoint safety.",
                             target_node,
                             expected_count,
                             response.processed_count,
                             response.skipped_count,
-                            response.success
                         );
-                        // TODO: Implement handling for partially indexed batches
-                        // Options: dead letter queue, manual intervention, or retry entire batch
+                        tracing::debug!(
+                            target: "test_event",
+                            source = %TestEventSource::Ingestor,
+                            event = %TestEvent::BatchFlushNodeFailure,
+                            table = self.table_name,
+                            target_node,
+                            error = format!(
+                                "partial ack: {}/{} ops processed",
+                                total_processed, expected_count
+                            )
+                        );
+                        failed_nodes.push(target_node);
                     } else {
                         info!(
                             "Node {}: processed {} ops, skipped {} ops, success: {}",
@@ -225,22 +243,16 @@ impl Service {
                             skipped_count = response.skipped_count,
                             success = response.success
                         );
-                        let writetime_batch_max = &operations
-                            .iter()
-                            .max_by(|a, b| a.writetime.cmp(&b.writetime))
-                            .map(|x| x.writetime);
-                        if let Some(writetime) = writetime_batch_max {
-                            let writetime_micro = std::time::Duration::from_micros(*writetime);
-                            let is_committed =
-                                Checkpointer::commit_last_read_offset(writetime_micro);
-                            match is_committed {
-                                Ok(_) => info!("Batch writetime committed successfully"),
-                                // TODO: Something went wrong with committing the writetime. Not sure what to do.
-                                Err(e) => error!("Error committing batch: {}", e),
-                            }
+
+                        // Collect this node's max writetime for the deferred
+                        // global checkpoint commit.
+                        if let Some(max_wt) = operations.iter().map(|op| op.writetime).max() {
+                            node_max_writetimes.push(max_wt);
                         } else {
-                            // TODO: We are in uncertain state. Not sure what to do.
-                            error!("Failed to find max writetime for batch");
+                            error!(
+                                "Node {}: could not compute max writetime for batch",
+                                target_node
+                            );
                         }
                     }
                 }
@@ -275,6 +287,14 @@ impl Service {
                 failed_nodes,
                 message: format!("Failed to flush batches to {} nodes", failed_count),
             });
+        }
+
+        if let Some(&global_max_writetime) = node_max_writetimes.iter().max() {
+            let writetime_micro = std::time::Duration::from_micros(global_max_writetime);
+            match Checkpointer::commit_last_read_offset(writetime_micro) {
+                Ok(_) => info!("Checkpoint advanced to writetime {}", global_max_writetime),
+                Err(e) => error!("Error committing checkpoint after flush: {}", e),
+            }
         }
 
         tracing::debug!(

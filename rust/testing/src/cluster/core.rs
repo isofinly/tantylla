@@ -3,8 +3,13 @@ use crate::cluster::gateway::GatewayClient;
 use crate::cluster::scylladb::{
     apply_schema, connect_scylla, create_keyspace, ensure_binaries, wait_for_cdc_log_table,
 };
-use crate::cluster::services::{spawn_gateways, spawn_ingestors, spawn_search_nodes};
-use crate::cluster::utils::{parse_checkpoint, remove_dir_if_exists, remove_file_if_exists};
+use crate::cluster::services::{
+    spawn_gateways, spawn_ingestors, spawn_search_nodes, spawn_single_ingestor,
+    spawn_single_search_node,
+};
+use crate::cluster::utils::{
+    parse_checkpoint, remove_dir_if_exists, remove_file_if_exists, wait_for_tcp,
+};
 use crate::process::{ServiceProcess, workspace_root};
 use crate::trace::TraceCollector;
 use anyhow::Context;
@@ -137,6 +142,7 @@ impl TestClusterBuilder {
             keyspace,
             table_name: self.table_name,
             topology: self.topology,
+            scylla: self.scylla,
             node_addrs,
             gateway_addrs,
             node_processes: node_processes.into_iter().map(Some).collect(),
@@ -160,6 +166,7 @@ pub struct TestCluster {
     keyspace: String,
     table_name: String,
     topology: TopologyConfig,
+    scylla: ScyllaConfig,
     node_addrs: Vec<String>,
     gateway_addrs: Vec<String>,
     node_processes: Vec<Option<ServiceProcess>>,
@@ -318,6 +325,67 @@ impl TestCluster {
         if let Some(mut process) = process.take() {
             process.terminate(3).await.context("terminating gateway")?;
         }
+        Ok(())
+    }
+
+    /// Restarts search node `index` by terminating the old process and spawning
+    /// a fresh one on the **same port**.
+    ///
+    /// The method blocks until TCP is accepting connections again
+    /// so the caller can immediately use the node.
+    pub async fn restart_node(&mut self, index: usize) -> anyhow::Result<()> {
+        if let Some(slot) = self.node_processes.get_mut(index) {
+            if let Some(mut old) = slot.take() {
+                old.terminate(3)
+                    .await
+                    .context("terminating old search node")?;
+            }
+        } else {
+            anyhow::bail!("search node index {} out of range", index);
+        }
+
+        let addr = self
+            .node_addrs
+            .get(index)
+            .context("locating node address")?
+            .clone();
+        let socket_addr: std::net::SocketAddr = addr.parse().context("parsing node address")?;
+        let port = socket_addr.port();
+
+        let process = spawn_single_search_node(port, &self.instrumentation)
+            .await
+            .context("spawning replacement search node")?;
+
+        wait_for_tcp(socket_addr, SERVICE_READY_TIMEOUT_SECS)
+            .await
+            .context("waiting for replacement search node")?;
+
+        self.node_processes[index] = Some(process);
+        Ok(())
+    }
+
+    /// Restarts ingestor `index` by terminating the old process and spawning a
+    /// fresh one.
+    pub async fn restart_ingestor(&mut self, index: usize) -> anyhow::Result<()> {
+        if let Some(slot) = self.ingestor_processes.get_mut(index) {
+            if let Some(mut old) = slot.take() {
+                old.terminate(3).await.context("terminating old ingestor")?;
+            }
+        } else {
+            anyhow::bail!("ingestor index {} out of range", index);
+        }
+
+        let process = spawn_single_ingestor(
+            &self.scylla,
+            &self.keyspace,
+            &self.table_name,
+            &self.node_addrs,
+            &self.instrumentation,
+        )
+        .await
+        .context("spawning replacement ingestor")?;
+
+        self.ingestor_processes[index] = Some(process);
         Ok(())
     }
 
