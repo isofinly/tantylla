@@ -5,9 +5,9 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
-use dashmap::DashMap;
+use dashmap::{DashMap, DashSet};
 use serde::{Deserialize, Serialize};
-use tantivy::collector::{Count, TopDocs};
+use tantivy::collector::{Count, DocSetCollector, TopDocs};
 use tantivy::query::{BooleanQuery, Occur, QueryParser, RangeQuery};
 use tantivy::schema::{
     FAST, Field, IndexRecordOption, JsonObjectOptions, STORED, STRING, Schema, TextFieldIndexing,
@@ -43,6 +43,7 @@ impl Default for AdaptiveConfig {
 #[derive(Clone, Serialize, Deserialize)]
 struct Doc {
     id: String,
+    partition_key: String,
     doc: serde_json::Value,
     expires_at: i64,
     writetime: u64,
@@ -57,6 +58,7 @@ pub(crate) struct Engine {
     schema: Schema,
     // TODO: Move it somewhere else
     field_id: Field,
+    field_partition_key: Field,
     field_doc: Field,
     field_expires_at: Field,
     config: AdaptiveConfig,
@@ -73,6 +75,10 @@ impl Engine {
 
         let mut schema_builder = Schema::builder();
         let field_id = schema_builder.add_text_field("id", STRING | STORED);
+        // Indexed separately so the node can efficiently find all documents
+        // belonging to the same ScyllaDB partition (needed for partition deletes
+        // and range delete resolution).
+        let field_partition_key = schema_builder.add_text_field("partition_key", STRING | STORED);
         let field_expires_at = schema_builder.add_i64_field("expires_at", FAST | STORED);
         // No need to interact with writetime field. We can safely ignore its handle.
         let _ = schema_builder.add_i64_field("writetime", FAST | STORED);
@@ -104,6 +110,7 @@ impl Engine {
             writer: Arc::new(RwLock::new(writer)),
             schema,
             field_id,
+            field_partition_key,
             field_doc,
             field_expires_at,
             config,
@@ -170,9 +177,14 @@ impl Engine {
                         i64::MAX
                     };
 
+                    // Fall back to the full document ID when the ingestor omits it
+                    // (e.g. tables with no clustering key where id == partition_key).
+                    let partition_key = op.partition_key.clone().unwrap_or_else(|| op.id.clone());
+
                     let generation = self.current_generation.load(Ordering::Acquire);
                     let uncommitted_doc = Doc {
                         id: op.id.clone(),
+                        partition_key: partition_key.clone(),
                         doc: current_doc_json.clone(),
                         writetime: op.writetime,
                         expires_at,
@@ -183,6 +195,7 @@ impl Engine {
 
                     let full_doc_wrapper = serde_json::json!({
                         "id": op.id,
+                        "partition_key": partition_key,
                         "expires_at": expires_at,
                         "document": current_doc_json,
                         "writetime": op.writetime,
@@ -214,6 +227,18 @@ impl Engine {
                     let term = Term::from_field_text(self.field_id, &op.id);
                     writer.delete_term(term);
                     uncommitted.remove(&op.id);
+                    processed += 1;
+                }
+                OpType::PartitionDelete => {
+                    // The ingestor sets `partition_key` on the operation;
+                    // if missing we fall back to `id`
+                    let pk = op.partition_key.as_deref().unwrap_or(&op.id);
+
+                    let term = Term::from_field_text(self.field_partition_key, pk);
+                    writer.delete_term(term);
+
+                    uncommitted.retain(|_, doc| doc.partition_key != pk);
+
                     processed += 1;
                 }
                 _ => skipped += 1,
@@ -406,8 +431,17 @@ impl Engine {
                     None => serde_json::json!({}),
                 };
 
+                let partition_key = full_doc_val
+                    .get("partition_key")
+                    .and_then(|v| v.as_array())
+                    .and_then(|a| a.first())
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+
                 return Some(Doc {
                     id: id.to_string(),
+                    partition_key,
                     doc: doc_body,
                     writetime,
                     expires_at,
@@ -417,6 +451,49 @@ impl Engine {
         }
 
         None
+    }
+
+    /// Returns all document IDs that share the given partition key.
+    ///
+    /// Searches both the committed Tantivy index and the uncommitted
+    /// in-memory cache so that recently-ingested documents are included
+    /// even before the next Tantivy commit.
+    pub(crate) fn list_document_ids_by_partition_key(&self, partition_key: &str) -> Vec<String> {
+        let mut ids: Vec<String> = Vec::new();
+        let seen_from_cache: DashSet<String>;
+
+        {
+            let cache_ids: Vec<String> = self
+                .uncommitted_docs
+                .iter()
+                .filter(|entry| entry.value().partition_key == partition_key)
+                .map(|entry| entry.key().clone())
+                .collect();
+            seen_from_cache = cache_ids.iter().cloned().collect();
+            ids.extend(cache_ids);
+        }
+
+        let searcher = self.reader.searcher();
+        let term = Term::from_field_text(self.field_partition_key, partition_key);
+        let term_query = tantivy::query::TermQuery::new(term, IndexRecordOption::Basic);
+
+        let top_docs = searcher
+            // TODO: Maybe this is not optimal
+            .search(&term_query, &DocSetCollector)
+            .unwrap_or_default();
+
+        for doc_addr in top_docs {
+            if let Ok(retrieved) = searcher.doc::<TantivyDocument>(doc_addr)
+                && let Some(id) = retrieved.get_first(self.field_id).and_then(|v| v.as_str())
+            {
+                // Avoid duplicates: cache entries take precedence.
+                if !seen_from_cache.contains(id) {
+                    ids.push(id.to_string());
+                }
+            }
+        }
+
+        ids
     }
 }
 

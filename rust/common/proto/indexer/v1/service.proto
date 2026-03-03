@@ -12,6 +12,12 @@ service IndexService {
   // Executes a search query against the local Tantivy index.
   rpc Search(SearchRequest) returns (SearchResponse);
 
+  // Returns all document IDs that share the given partition key.
+  // Used by the ingestor to resolve range deletes: the ingestor queries
+  // for candidate document IDs, filters by clustering key range locally,
+  // and then issues individual DELETE operations.
+  rpc ListDocumentIdsByPartitionKey(ListDocIdsRequest) returns (ListDocIdsResponse);
+
   // Simple health check for the Ingestor/Gateway to know if this node is alive.
   rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
 }
@@ -31,8 +37,11 @@ message IndexOperation {
     OP_TYPE_UNSPECIFIED = 0;
     // Insert or Update (Tantivy handles both as "delete old + add new").
     OP_TYPE_UPSERT = 1;
-    // Hard delete (Tombstone).
+    // Hard delete (Tombstone) targeting a single document by exact ID.
     OP_TYPE_DELETE = 2;
+    // Partition delete: removes ALL documents sharing a partition key.
+    // The node uses the `partition_key` field (not `id`) to locate targets.
+    OP_TYPE_PARTITION_DELETE = 3;
   }
 
   // The unique Primary Key of the row (e.g., UUID or String).
@@ -41,7 +50,7 @@ message IndexOperation {
   // 2. Deduplication.
   string id = 1;
 
-  // The operation type (Upsert or Delete).
+  // The operation type (Upsert, Delete, or PartitionDelete).
   OpType op_type = 2;
 
   // ScyllaDB 'writetime' (microseconds).
@@ -58,7 +67,7 @@ message IndexOperation {
   // - For UPSERT: A JSON string representing the row columns.
   //   Collection columns with delta semantics are excluded from this field
   //   and instead represented in collection_deltas below.
-  // - For DELETE: Empty (we only need the ID to delete).
+  // - For DELETE / PARTITION_DELETE: Empty (we only need the ID to delete).
   // We use string (JSON) for flexibility so the schema can evolve
   // without changing the Proto definition.
   string payload_json = 5;
@@ -73,6 +82,15 @@ message IndexOperation {
   //
   // PostImage rows carry the full state in payload_json and leave this empty.
   repeated CollectionDelta collection_deltas = 6;
+
+  // The partition key portion of the document ID (e.g., "user-123" for a
+  // table with PRIMARY KEY (user_id, order_id)).
+  //
+  // - For UPSERT: indexed as a separate Tantivy field so the node can
+  //   efficiently look up all documents belonging to the same partition.
+  // - For PARTITION_DELETE: identifies which partition to delete.
+  // - For DELETE: optional; unused by the node but may be set for consistency.
+  optional string partition_key = 7;
 }
 
 // Represents a delta operation on a single non-frozen collection column.
@@ -171,6 +189,21 @@ message SearchHit {
   // The stored document content (as JSON).
   // Gateway will aggregate these.
   string payload_json = 3;
+}
+
+// ------------------------------------------------------------
+// List Document IDs Messages
+// ------------------------------------------------------------
+
+message ListDocIdsRequest {
+  // The partition key value to search for.
+  // Must match the `partition_key` field indexed on documents.
+  string partition_key = 1;
+}
+
+message ListDocIdsResponse {
+  // All document IDs that share the given partition key.
+  repeated string document_ids = 1;
 }
 
 // ------------------------------------------------------------

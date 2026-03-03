@@ -40,6 +40,11 @@ pub(crate) struct BatchItem {
     /// for PostImage rows and deletes.
     #[serde(default)]
     pub collection_deltas: Vec<CollectionDelta>,
+    /// The partition key portion of the document ID (e.g., "user-123").
+    /// Used by the node to index documents by partition for efficient
+    /// partition-level deletes and range delete resolution.
+    #[serde(default)]
+    pub partition_key: Option<String>,
 }
 
 const DEFAULT_FLUSH_INTERVAL: Duration = Duration::from_millis(500);
@@ -166,6 +171,7 @@ impl Service {
                         cdc_ttl: batch_item.cdc_ttl,
                         payload_json: batch_item.payload_json,
                         collection_deltas: batch_item.collection_deltas,
+                        partition_key: batch_item.partition_key,
                     };
 
                     node_batches

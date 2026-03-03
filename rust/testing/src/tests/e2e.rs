@@ -76,7 +76,7 @@ async fn e2e_cdc_to_gateway_search() -> Result<()> {
                 }
 
                 // TODO: Verify it
-                let checkpoint_timestamp = cluster
+                let _checkpoint_timestamp = cluster
                     .wait_for_checkpoint(20)
                     .await
                     .context("waiting for checkpoint")?;
@@ -104,7 +104,7 @@ async fn e2e_cdc_to_gateway_search() -> Result<()> {
                     .event_from_source(TestEventSource::Node, TestEvent::SearchResponse)
                     .event_from_source(TestEventSource::Gateway, TestEvent::SearchResponse);
                 // TODO: Use this variable
-                let matched_events = trace_collector
+                let _matched_events = trace_collector
                     .wait_for_sequence(&search_sequence, 20)
                     .await
                     .context("waiting for search trace sequence")?;
@@ -427,7 +427,6 @@ async fn e2e_cdc_set_addition_indexes_added_label() -> Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "Known issue 005"]
 async fn e2e_row_delete_removes_single_clustering_row() -> Result<()> {
     let _ = tracing_subscriber::fmt()
         .with_env_filter("info")
@@ -534,7 +533,6 @@ async fn e2e_row_delete_removes_single_clustering_row() -> Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "Known issue 005"]
 async fn e2e_range_delete_removes_rows_within_bounds() -> Result<()> {
     let _ = tracing_subscriber::fmt()
         .with_env_filter("info")
@@ -628,7 +626,6 @@ async fn e2e_range_delete_removes_rows_within_bounds() -> Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "Known issue 006"]
 async fn e2e_partition_key_delete_removes_single_primary_key_row() -> Result<()> {
     let _ = tracing_subscriber::fmt()
         .with_env_filter("info")
@@ -712,7 +709,6 @@ async fn e2e_partition_key_delete_removes_single_primary_key_row() -> Result<()>
 }
 
 #[tokio::test]
-#[ignore = "Known issue 006"]
 async fn e2e_partition_delete_removes_all_rows_for_partition() -> Result<()> {
     let _ = tracing_subscriber::fmt()
         .with_env_filter("info")

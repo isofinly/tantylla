@@ -195,6 +195,18 @@ fn cql_to_json(val: &CqlValue) -> Value {
 pub(super) struct TableKeyInfo {
     pub partition_key_columns: Vec<String>,
     pub full_primary_key_columns: Vec<String>,
+    /// Clustering key columns with their CQL types (in position order).
+    /// Needed for type-aware range comparison when resolving range deletes.
+    pub clustering_key_columns: Vec<ClusteringKeyColumn>,
+}
+
+/// A clustering key column name paired with its CQL type string
+/// (e.g. "int", "text", "uuid"). The type is used for correct
+/// ordering when filtering document IDs by clustering key range.
+#[derive(Debug, Clone)]
+pub(super) struct ClusteringKeyColumn {
+    pub name: String,
+    pub cql_type: String,
 }
 
 pub(super) async fn get_table_key_info(
@@ -203,7 +215,7 @@ pub(super) async fn get_table_key_info(
     table: &str,
 ) -> Result<TableKeyInfo> {
     let query = r#"
-            SELECT column_name, position, kind
+            SELECT column_name, position, kind, type
             FROM system_schema.columns
             WHERE keyspace_name = ?
             AND table_name = ?
@@ -218,14 +230,14 @@ pub(super) async fn get_table_key_info(
     let rows_result = result.into_rows_result()?;
 
     let mut partition_keys: Vec<(i32, String)> = Vec::new();
-    let mut clustering_keys: Vec<(i32, String)> = Vec::new();
+    let mut clustering_keys: Vec<(i32, String, String)> = Vec::new();
 
-    for row_res in rows_result.rows::<(String, i32, String)>()? {
-        let (name, pos, kind) = row_res?;
+    for row_res in rows_result.rows::<(String, i32, String, String)>()? {
+        let (name, pos, kind, cql_type) = row_res?;
         if kind == "partition_key" {
             partition_keys.push((pos, name));
         } else {
-            clustering_keys.push((pos, name));
+            clustering_keys.push((pos, name, cql_type));
         }
     }
 
@@ -233,7 +245,18 @@ pub(super) async fn get_table_key_info(
     clustering_keys.sort_by_key(|k| k.0);
 
     let pk_names: Vec<String> = partition_keys.into_iter().map(|(_, name)| name).collect();
-    let ck_names: Vec<String> = clustering_keys.into_iter().map(|(_, name)| name).collect();
+
+    let ck_columns: Vec<ClusteringKeyColumn> = clustering_keys
+        .iter()
+        .map(|(_, name, cql_type)| ClusteringKeyColumn {
+            name: name.clone(),
+            cql_type: cql_type.clone(),
+        })
+        .collect();
+    let ck_names: Vec<String> = clustering_keys
+        .into_iter()
+        .map(|(_, name, _)| name)
+        .collect();
 
     let mut full_pk = pk_names.clone();
     full_pk.extend(ck_names);
@@ -241,9 +264,11 @@ pub(super) async fn get_table_key_info(
     Ok(TableKeyInfo {
         partition_key_columns: pk_names,
         full_primary_key_columns: full_pk,
+        clustering_key_columns: ck_columns,
     })
 }
 
+/// Finds the target node id based on partition key value hash of the CDC row.
 pub(super) fn get_target_node_id(
     row: &scylla_cdc::consumer::CDCRow<'_>,
     pk_names: &Vec<String>,
@@ -260,4 +285,64 @@ pub(super) fn get_target_node_id(
 
     let hash_value = hasher.finish();
     hash_value as usize % n_search_nodes
+}
+
+/// Compares two string-formatted CQL values according to their CQL type.
+///
+/// Document IDs contain CQL values formatted as strings (e.g. `"42"` for int,
+/// `"hello"` for text). Plain lexicographic comparison breaks for numeric
+/// types (`"2" > "10"` lexicographically), so we parse back to typed values.
+///
+/// Returns `Ordering` consistent with ScyllaDB's clustering key ordering.
+pub(super) fn compare_cql_values(a: &str, b: &str, cql_type: &str) -> std::cmp::Ordering {
+    // Normalise the CQL type name to lowercase for matching.
+    let ty = cql_type.to_lowercase();
+
+    match ty.as_str() {
+        "int" | "varint" | "smallint" | "tinyint" => {
+            let pa = a.parse::<i64>();
+            let pb = b.parse::<i64>();
+            match (pa, pb) {
+                (Ok(va), Ok(vb)) => va.cmp(&vb),
+                _ => a.cmp(b), // fallback to lex if parse fails
+            }
+        }
+        "bigint" | "counter" => {
+            let pa = a.parse::<i64>();
+            let pb = b.parse::<i64>();
+            match (pa, pb) {
+                (Ok(va), Ok(vb)) => va.cmp(&vb),
+                _ => a.cmp(b),
+            }
+        }
+        "float" => {
+            let pa = a.parse::<f32>();
+            let pb = b.parse::<f32>();
+            match (pa, pb) {
+                (Ok(va), Ok(vb)) => va.total_cmp(&vb),
+                _ => a.cmp(b),
+            }
+        }
+        "double" => {
+            let pa = a.parse::<f64>();
+            let pb = b.parse::<f64>();
+            match (pa, pb) {
+                (Ok(va), Ok(vb)) => va.total_cmp(&vb),
+                _ => a.cmp(b),
+            }
+        }
+        "timestamp" => {
+            // Timestamps are stored as milliseconds since epoch (i64).
+            let pa = a.parse::<i64>();
+            let pb = b.parse::<i64>();
+            match (pa, pb) {
+                (Ok(va), Ok(vb)) => va.cmp(&vb),
+                _ => a.cmp(b),
+            }
+        }
+        // text, ascii, varchar, uuid, timeuuid, blob, inet, etc.
+        // All compare correctly via lexicographic ordering of their
+        // string representations (UUIDs are formatted consistently).
+        _ => a.cmp(b),
+    }
 }
