@@ -71,10 +71,9 @@ impl Visit for JsonVisitor {
     }
 
     fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
-        self.fields.insert(
-            field.name().to_string(),
-            Value::from(format!("{:?}", value)),
-        );
+        let s = format!("{:?}", value);
+        let json_value = serde_json::from_str::<Value>(&s).unwrap_or_else(|_| Value::from(s));
+        self.fields.insert(field.name().to_string(), json_value);
     }
 }
 
