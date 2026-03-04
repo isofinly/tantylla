@@ -24,7 +24,7 @@ from datetime import datetime, timedelta, timezone
 
 try:
     from cassandra.cluster import Cluster
-    from cassandra.query import BatchStatement, SimpleStatement, ConsistencyLevel
+    from cassandra.query import BatchStatement, ConsistencyLevel, SimpleStatement
 except ImportError:
     print(
         "ERROR: cassandra-driver is required.\n"
@@ -33,79 +33,193 @@ except ImportError:
     )
     sys.exit(1)
 
-
-# =========================================================================
-# Realistic product data vocabularies
-# =========================================================================
-# These word lists produce search-friendly text that exercises stemming,
-# multi-term matching, and phrase queries.
-
 BRANDS = [
-    "Acme", "Zenith", "Apex", "Stellar", "Vortex", "Nexus", "Pinnacle",
-    "Prism", "Quantum", "Aether", "Cascade", "Meridian", "Solaris",
-    "Titanium", "Vertex", "Aurora", "Helios", "Nimbus", "Orion", "Phoenix",
+    "Acme",
+    "Zenith",
+    "Apex",
+    "Stellar",
+    "Vortex",
+    "Nexus",
+    "Pinnacle",
+    "Prism",
+    "Quantum",
+    "Aether",
+    "Cascade",
+    "Meridian",
+    "Solaris",
+    "Titanium",
+    "Vertex",
+    "Aurora",
+    "Helios",
+    "Nimbus",
+    "Orion",
+    "Phoenix",
 ]
 
 CATEGORIES = {
     "Electronics": [
-        "Headphones", "Speakers", "Chargers", "Cables", "Adapters",
-        "Keyboards", "Mice", "Monitors", "Webcams", "Microphones",
+        "Headphones",
+        "Speakers",
+        "Chargers",
+        "Cables",
+        "Adapters",
+        "Keyboards",
+        "Mice",
+        "Monitors",
+        "Webcams",
+        "Microphones",
     ],
     "Home & Kitchen": [
-        "Cookware", "Utensils", "Storage", "Lighting", "Cleaning",
-        "Organizers", "Appliances", "Textiles", "Decor", "Furniture",
+        "Cookware",
+        "Utensils",
+        "Storage",
+        "Lighting",
+        "Cleaning",
+        "Organizers",
+        "Appliances",
+        "Textiles",
+        "Decor",
+        "Furniture",
     ],
     "Sports & Outdoors": [
-        "Fitness", "Camping", "Cycling", "Running", "Swimming",
-        "Hiking", "Climbing", "Yoga", "Training", "Recovery",
+        "Fitness",
+        "Camping",
+        "Cycling",
+        "Running",
+        "Swimming",
+        "Hiking",
+        "Climbing",
+        "Yoga",
+        "Training",
+        "Recovery",
     ],
     "Books & Media": [
-        "Fiction", "Non-Fiction", "Technical", "Reference", "Audio",
-        "Educational", "Science", "History", "Biography", "Philosophy",
+        "Fiction",
+        "Non-Fiction",
+        "Technical",
+        "Reference",
+        "Audio",
+        "Educational",
+        "Science",
+        "History",
+        "Biography",
+        "Philosophy",
     ],
     "Clothing & Accessories": [
-        "Shirts", "Pants", "Jackets", "Shoes", "Hats",
-        "Bags", "Watches", "Belts", "Scarves", "Gloves",
+        "Shirts",
+        "Pants",
+        "Jackets",
+        "Shoes",
+        "Hats",
+        "Bags",
+        "Watches",
+        "Belts",
+        "Scarves",
+        "Gloves",
     ],
 }
 
 ADJECTIVES = [
-    "premium", "ultra", "wireless", "portable", "compact", "ergonomic",
-    "lightweight", "durable", "professional", "advanced", "high-performance",
-    "noise-cancelling", "waterproof", "rechargeable", "foldable",
-    "adjustable", "breathable", "insulated", "magnetic", "bluetooth",
-    "stainless", "organic", "eco-friendly", "heavy-duty", "slim",
+    "premium",
+    "ultra",
+    "wireless",
+    "portable",
+    "compact",
+    "ergonomic",
+    "lightweight",
+    "durable",
+    "professional",
+    "advanced",
+    "high-performance",
+    "noise-cancelling",
+    "waterproof",
+    "rechargeable",
+    "foldable",
+    "adjustable",
+    "breathable",
+    "insulated",
+    "magnetic",
+    "bluetooth",
+    "stainless",
+    "organic",
+    "eco-friendly",
+    "heavy-duty",
+    "slim",
 ]
 
 FEATURES = [
-    "with quick-charge technology", "featuring active noise cancellation",
-    "built for all-day comfort", "designed for professionals",
-    "with extended battery life", "featuring anti-slip grip",
-    "with temperature control", "optimized for daily use",
-    "with smart connectivity", "featuring precision engineering",
-    "with impact-resistant construction", "designed for outdoor adventures",
-    "with memory foam cushioning", "featuring LED indicators",
-    "with one-touch operation", "with USB-C fast charging",
-    "with multi-device pairing", "featuring titanium frame",
-    "with ambient awareness mode", "built with recycled materials",
+    "with quick-charge technology",
+    "featuring active noise cancellation",
+    "built for all-day comfort",
+    "designed for professionals",
+    "with extended battery life",
+    "featuring anti-slip grip",
+    "with temperature control",
+    "optimized for daily use",
+    "with smart connectivity",
+    "featuring precision engineering",
+    "with impact-resistant construction",
+    "designed for outdoor adventures",
+    "with memory foam cushioning",
+    "featuring LED indicators",
+    "with one-touch operation",
+    "with USB-C fast charging",
+    "with multi-device pairing",
+    "featuring titanium frame",
+    "with ambient awareness mode",
+    "built with recycled materials",
 ]
 
 MATERIALS = [
-    "aluminum", "carbon fiber", "bamboo", "silicone", "leather",
-    "nylon", "polyester", "stainless steel", "copper", "ceramic",
-    "titanium", "polycarbonate", "rubber", "cotton", "mesh",
+    "aluminum",
+    "carbon fiber",
+    "bamboo",
+    "silicone",
+    "leather",
+    "nylon",
+    "polyester",
+    "stainless steel",
+    "copper",
+    "ceramic",
+    "titanium",
+    "polycarbonate",
+    "rubber",
+    "cotton",
+    "mesh",
 ]
 
 TAG_POOL = [
-    "bestseller", "new-arrival", "sale", "limited-edition", "eco-friendly",
-    "award-winning", "trending", "staff-pick", "value-pack", "clearance",
-    "premium", "budget-friendly", "handcrafted", "imported", "refurbished",
-    "gift-idea", "seasonal", "exclusive", "bundle", "subscription",
+    "bestseller",
+    "new-arrival",
+    "sale",
+    "limited-edition",
+    "eco-friendly",
+    "award-winning",
+    "trending",
+    "staff-pick",
+    "value-pack",
+    "clearance",
+    "premium",
+    "budget-friendly",
+    "handcrafted",
+    "imported",
+    "refurbished",
+    "gift-idea",
+    "seasonal",
+    "exclusive",
+    "bundle",
+    "subscription",
 ]
 
 ATTRIBUTE_KEYS = [
-    "color", "weight_grams", "dimensions_cm", "warranty_months",
-    "country_of_origin", "material", "power_source", "connectivity",
+    "color",
+    "weight_grams",
+    "dimensions_cm",
+    "warranty_months",
+    "country_of_origin",
+    "material",
+    "power_source",
+    "connectivity",
 ]
 
 
@@ -146,9 +260,12 @@ def generate_product() -> dict:
 
     tags = set(random.sample(TAG_POOL, k=random.randint(1, 5)))
     attributes = {
-        k: random.choice(MATERIALS) if k == "material"
-        else str(random.randint(100, 5000)) if k == "weight_grams"
-        else str(random.randint(1, 36)) if k == "warranty_months"
+        k: random.choice(MATERIALS)
+        if k == "material"
+        else str(random.randint(100, 5000))
+        if k == "weight_grams"
+        else str(random.randint(1, 36))
+        if k == "warranty_months"
         else random.choice(["US", "DE", "JP", "CN", "KR", "GB"])
         for k in random.sample(ATTRIBUTE_KEYS, k=random.randint(2, 5))
     }
@@ -199,12 +316,25 @@ def seed(host: str, port: int, count: int, batch_size: int = 50) -> None:
 
         for _ in range(batch_count):
             p = generate_product()
-            batch.add(insert_cql, (
-                p["product_id"], p["name"], p["description"], p["brand"],
-                p["category"], p["subcategory"], p["tags"], p["attributes"],
-                p["price"], p["stock_quantity"], p["rating_avg"],
-                p["review_count"], p["created_at"], p["updated_at"],
-            ))
+            batch.add(
+                insert_cql,
+                (
+                    p["product_id"],
+                    p["name"],
+                    p["description"],
+                    p["brand"],
+                    p["category"],
+                    p["subcategory"],
+                    p["tags"],
+                    p["attributes"],
+                    p["price"],
+                    p["stock_quantity"],
+                    p["rating_avg"],
+                    p["review_count"],
+                    p["created_at"],
+                    p["updated_at"],
+                ),
+            )
 
         session.execute(batch)
         inserted += batch_count
@@ -220,7 +350,9 @@ def seed(host: str, port: int, count: int, batch_size: int = 50) -> None:
 
     elapsed = time.monotonic() - t0
     rate = count / elapsed if elapsed > 0 else 0
-    print(f"\nDone. Inserted {count:,} products in {elapsed:.1f}s ({rate:,.0f} docs/sec)")
+    print(
+        f"\nDone. Inserted {count:,} products in {elapsed:.1f}s ({rate:,.0f} docs/sec)"
+    )
 
     # Also export the search query terms for the benchmark runner.
     # We sample product names from what we inserted so queries have
@@ -235,12 +367,16 @@ def main():
     parser.add_argument("--host", default="localhost", help="ScyllaDB host")
     parser.add_argument("--port", type=int, default=9043, help="ScyllaDB CQL port")
     parser.add_argument(
-        "--count", type=int, default=100_000,
-        help="Number of product documents to insert"
+        "--count",
+        type=int,
+        default=100_000,
+        help="Number of product documents to insert",
     )
     parser.add_argument(
-        "--batch-size", type=int, default=50,
-        help="CQL batch size (too large may cause timeouts)"
+        "--batch-size",
+        type=int,
+        default=50,
+        help="CQL batch size (too large may cause timeouts)",
     )
     args = parser.parse_args()
 

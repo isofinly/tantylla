@@ -48,12 +48,6 @@ except ImportError:
     sys.exit(1)
 
 
-# =========================================================================
-# Query Generation
-# =========================================================================
-# Queries are drawn from vocabularies used by seed-data.py so they have
-# a high probability of matching indexed documents.
-
 SINGLE_TERMS = [
     "wireless",
     "premium",
@@ -182,11 +176,6 @@ def generate_query_mix(count: int) -> list[dict]:
     return queries
 
 
-# =========================================================================
-# Search Clients
-# =========================================================================
-
-
 def search_tantylla(
     url: str, query: str, limit: int = 10, session: Optional[requests.Session] = None
 ) -> dict:
@@ -242,11 +231,6 @@ def search_elasticsearch(
     """
     req = session or requests
 
-    # The ScyllaDB CDC Source Connector wraps each column value in a
-    # ``{"value": "..."}`` envelope under the ``after`` key, so the actual
-    # indexed field paths are ``after.<column>.value``, not flat top-level
-    # names.  These five paths mirror ``_TANTIVY_TEXT_FIELDS`` exactly,
-    # ensuring both engines receive an equivalent per-query workload.
     _ES_TEXT_FIELDS = [
         "after.name.value",
         "after.description.value",
@@ -255,8 +239,6 @@ def search_elasticsearch(
         "after.subcategory.value",
     ]
 
-    # Use multi_match to search across all text fields, similar to how
-    # Tantivy's QueryParser searches the JSON document field.
     body = {
         "query": {
             "multi_match": {
@@ -266,14 +248,9 @@ def search_elasticsearch(
             }
         },
         "size": limit,
-        # Force an exact hit count so total_hits is populated correctly.
-        # Without this ES caps counting at 10,000 and may return 0 for
-        # some response shapes when the threshold is not reached.
         "track_total_hits": True,
     }
 
-    # For phrase queries, use match_phrase instead of best_fields so that
-    # token order is enforced, matching Tantivy phrase-query semantics.
     if query.startswith('"') and query.endswith('"'):
         phrase = query.strip('"')
         body = {
@@ -300,11 +277,6 @@ def search_elasticsearch(
         "total_hits": hits.get("total", {}).get("value", 0),
         "hit_count": len(hits.get("hits", [])),
     }
-
-
-# =========================================================================
-# Benchmark Runner
-# =========================================================================
 
 
 @dataclass
@@ -579,7 +551,6 @@ def main():
         lat.throughput_errors = tput_errors
         print()
 
-    # --- Elasticsearch ---
     if args.elasticsearch_url:
         print(f"Benchmarking Elasticsearch at {args.elasticsearch_url}")
         search_fn = lambda q, session=None: search_elasticsearch(
