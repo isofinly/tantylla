@@ -2,7 +2,6 @@ use anyhow::Context;
 use clap::Parser;
 use scylla::client::session_builder::SessionBuilder;
 use std::{
-    net::SocketAddr,
     sync::{Arc, OnceLock},
     time::{Duration, SystemTime},
 };
@@ -128,22 +127,15 @@ async fn main() -> anyhow::Result<()> {
     }
 
     info!("Connecting to ScyllaDB at {:?}...", &args.scylla_uri);
-    let scylla_uris: Vec<SocketAddr> = args
-        .scylla_uri
-        .into_iter()
-        .map(|s| {
-            s.parse::<SocketAddr>()
-                .expect("Failed to parse ScyllaDB URIs")
-        })
-        .collect();
+
 
     let session = SessionBuilder::new()
-        .known_nodes_addr(&scylla_uris)
+        .known_nodes(&args.scylla_uri)
         .build()
         .await?;
     let session = Arc::new(session);
 
-    info!("Connected to ScyllaDB at {:?}", &scylla_uris);
+    info!("Connected to ScyllaDB at {:?}", &args.scylla_uri);
 
     let mut node_info = ahash::AHashMap::new();
     let mut nodes = args.search_nodes.clone();
