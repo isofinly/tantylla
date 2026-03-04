@@ -116,7 +116,7 @@ variable "kafka_connect_host_port" {
 variable "elasticsearch_image" {
   description = "Elasticsearch Docker image"
   type        = string
-  default     = "elasticsearch:9.3.1"
+  default     = "elasticsearch:8.17.0"
 }
 
 variable "es_memory_mb" {

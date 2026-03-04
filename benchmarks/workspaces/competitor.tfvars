@@ -24,10 +24,3 @@ es_heap_mb      = 1024
 
 dataset_scale    = "medium"
 benchmark_prefix = "bench"
-
-# Pin to ES 8.x: the Confluent kafka-connect-elasticsearch connector v15.x
-# uses the legacy RestHighLevelClient (ES 7 API). That client sends
-# "Accept: application/vnd.elasticsearch+json;compatible-with=7" which ES 9.x
-# rejects with 400. ES 8.x still accepts the compatibility header, so 8.x is
-# the latest supported version for this connector.
-elasticsearch_image = "elasticsearch:8.17.0"
