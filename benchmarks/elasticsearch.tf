@@ -58,8 +58,8 @@ resource "docker_container" "elasticsearch" {
     "ES_JAVA_OPTS=-Xms${var.es_heap_mb}m -Xmx${var.es_heap_mb}m",
 
     # Reduce refresh interval from 1s default to match tantylla's commit
-    # interval for a fairer index-lag comparison.
-    "index.refresh_interval=5s",
+    # interval for a fairer index-lag comparison. Applied via index template
+    # after the container becomes healthy (see scripts/setup-connectors.sh).
 
     # Disable machine learning to save ~200 MB memory.
     "xpack.ml.enabled=false",

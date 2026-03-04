@@ -1,13 +1,4 @@
-# =========================================================================
-# Computed Values
-# =========================================================================
-#
-# Derived from input variables and the current workspace name. These
-# locals unify naming, port assignment, and resource budgets so the
-# individual .tf files stay clean.
-
 locals {
-  # Unique prefix for all Docker resources in this workspace.
   prefix = "${var.benchmark_prefix}-${terraform.workspace}"
 
   # -------------------------------------------------------------------
@@ -31,8 +22,6 @@ locals {
   # -------------------------------------------------------------------
   # Tantylla
   # -------------------------------------------------------------------
-  # Every node listens on port 10000 *inside* its container.
-  # Host ports are offset by index for debugging / direct access.
 
   tantylla_node_internal_port = 10000
 
@@ -44,13 +33,10 @@ locals {
     }
   } : {}
 
-  # Comma-separated address list consumed by ingestor --search-nodes.
   tantylla_ingestor_node_addrs = join(",", [
     for _, v in local.tantylla_nodes : "${v.name}:${local.tantylla_node_internal_port}"
   ])
 
-  # Comma-separated address list consumed by gateway --search-nodes.
-  # The gateway auto-prepends http:// when the scheme is absent.
   tantylla_gateway_node_addrs = join(",", [
     for _, v in local.tantylla_nodes : "${v.name}:${local.tantylla_node_internal_port}"
   ])

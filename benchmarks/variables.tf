@@ -1,10 +1,3 @@
-# =========================================================================
-# Input Variables
-# =========================================================================
-#
-# These variables control which stacks are deployed and how resources
-# are allocated. Override them per workspace via .tfvars files.
-
 # -------------------------------------------------------------------------
 # Stack toggles
 # -------------------------------------------------------------------------
@@ -67,7 +60,7 @@ variable "tantylla_sleep_interval_ms" {
 variable "scylla_image" {
   description = "ScyllaDB Docker image"
   type        = string
-  default     = "scylladb/scylla:6.2"
+  default     = "scylladb/scylla:2025.4"
 }
 
 variable "scylla_memory_mb" {
@@ -95,7 +88,7 @@ variable "scylla_host_port" {
 variable "kafka_image" {
   description = "Confluent Kafka image (KRaft mode, no ZooKeeper)"
   type        = string
-  default     = "confluentinc/cp-kafka:7.7.1"
+  default     = "confluentinc/cp-kafka:8.2.0"
 }
 
 variable "kafka_memory_mb" {
@@ -123,7 +116,7 @@ variable "kafka_connect_host_port" {
 variable "elasticsearch_image" {
   description = "Elasticsearch Docker image"
   type        = string
-  default     = "docker.elastic.co/elasticsearch/elasticsearch:8.16.0"
+  default     = "elasticsearch:9.3.1"
 }
 
 variable "es_memory_mb" {

@@ -42,8 +42,7 @@ try:
     import requests
 except ImportError:
     print(
-        "ERROR: requests is required.\n"
-        "Install it with: pip install requests",
+        "ERROR: requests is required.\nInstall it with: pip install requests",
         file=sys.stderr,
     )
     sys.exit(1)
@@ -56,11 +55,31 @@ except ImportError:
 # a high probability of matching indexed documents.
 
 SINGLE_TERMS = [
-    "wireless", "premium", "portable", "ergonomic", "bluetooth",
-    "waterproof", "rechargeable", "lightweight", "professional", "compact",
-    "durable", "foldable", "adjustable", "insulated", "magnetic",
-    "stainless", "organic", "headphones", "speakers", "keyboard",
-    "monitor", "camping", "fitness", "cycling", "running",
+    "wireless",
+    "premium",
+    "portable",
+    "ergonomic",
+    "bluetooth",
+    "waterproof",
+    "rechargeable",
+    "lightweight",
+    "professional",
+    "compact",
+    "durable",
+    "foldable",
+    "adjustable",
+    "insulated",
+    "magnetic",
+    "stainless",
+    "organic",
+    "headphones",
+    "speakers",
+    "keyboard",
+    "monitor",
+    "camping",
+    "fitness",
+    "cycling",
+    "running",
 ]
 
 MULTI_TERMS = [
@@ -95,9 +114,43 @@ PHRASE_QUERIES = [
 ]
 
 BRAND_QUERIES = [
-    "Acme", "Zenith", "Apex", "Stellar", "Vortex",
-    "Nexus", "Pinnacle", "Prism", "Quantum", "Aether",
+    "Acme",
+    "Zenith",
+    "Apex",
+    "Stellar",
+    "Vortex",
+    "Nexus",
+    "Pinnacle",
+    "Prism",
+    "Quantum",
+    "Aether",
 ]
+
+
+# Tantivy stores JSON field values under `field.key:token` terms, not as
+# a flat bag-of-words.
+_TANTIVY_TEXT_FIELDS = [
+    "document.name",
+    "document.description",
+    "document.brand",
+    "document.category",
+    "document.subcategory",
+]
+
+
+def _to_tantivy_query(raw: str) -> str:
+    """Expand a plain query to an explicit Tantivy JSON-field path query.
+
+    Phrase queries (surrounded by double-quotes) are forwarded verbatim with
+    the field prefix prepended so Tantivy uses phrase matching.  Multi-word
+    free-text queries are wrapped in parentheses so Tantivy treats them as a
+    per-field OR group.  Single terms are expanded across all fields.
+    """
+    if raw.startswith('"') and raw.endswith('"'):
+        return " OR ".join(f"{f}:{raw}" for f in _TANTIVY_TEXT_FIELDS)
+    if " " in raw:
+        return " OR ".join(f"{f}:({raw})" for f in _TANTIVY_TEXT_FIELDS)
+    return " OR ".join(f"{f}:{raw}" for f in _TANTIVY_TEXT_FIELDS)
 
 
 def generate_query_mix(count: int) -> list[dict]:
@@ -134,23 +187,44 @@ def generate_query_mix(count: int) -> list[dict]:
 # =========================================================================
 
 
-def search_tantylla(url: str, query: str, limit: int = 10) -> dict:
-    """Send a search request to the Tantylla gateway."""
-    resp = requests.post(
+def search_tantylla(
+    url: str, query: str, limit: int = 10, session: Optional[requests.Session] = None
+) -> dict:
+    """Send a search request to the Tantylla gateway.
+
+    Plain text queries are expanded to explicit Tantivy JSON field path syntax
+    before dispatch.  See ``_to_tantivy_query`` for the expansion rules.
+    """
+    req = session or requests
+    resp = req.post(
         f"{url}/api/v1/search",
-        json={"query": query, "limit": limit, "offset": 0, "consistency": 1},
+        json={
+            "query": _to_tantivy_query(query),
+            "limit": limit,
+            "offset": 0,
+            "consistency": 1,
+        },
         timeout=30,
     )
     resp.raise_for_status()
     data = resp.json()
     return {
-        "total_hits": data.get("total_hits", data.get("totalHits", 0)),
+        "total_hits": data.get("total_hits", 0),
         "hit_count": len(data.get("hits", [])),
     }
 
 
-def search_elasticsearch(url: str, query: str, limit: int = 10) -> dict:
-    """Send a search request to Elasticsearch."""
+def search_elasticsearch(
+    url: str, query: str, limit: int = 10, session: Optional[requests.Session] = None
+) -> dict:
+    """Send a search request to Elasticsearch.
+
+    The index name is ``scylla.benchmark.products`` because the Confluent
+    Elasticsearch Sink Connector derives the target index name from the Kafka
+    topic name, and the ScyllaDB CDC source connector produces events on topic
+    ``scylla.benchmark.products`` (topic_prefix=scylla + keyspace.table).
+    """
+    req = session or requests
     # Use multi_match to search across all text fields, similar to how
     # Tantivy's QueryParser searches the JSON document field.
     body = {
@@ -178,8 +252,8 @@ def search_elasticsearch(url: str, query: str, limit: int = 10) -> dict:
             "size": limit,
         }
 
-    resp = requests.post(
-        f"{url}/benchmark.products/_search",
+    resp = req.post(
+        f"{url}/scylla.benchmark.products/_search",
         json=body,
         timeout=30,
     )
@@ -202,7 +276,12 @@ class BenchmarkResult:
     system: str
     query_count: int
     latencies_ms: list[float] = field(default_factory=list)
-    errors: int = 0
+    # Errors from the sequential latency phase only.
+    latency_errors: int = 0
+    # Errors from the concurrent throughput phase (tracked separately
+    # because they are collected asynchronously and only merged at the
+    # end of the throughput run).
+    throughput_errors: int = 0
     total_hits: int = 0
 
     @property
@@ -241,31 +320,39 @@ def run_latency_benchmark(
     queries: list[dict],
     warmup: int = 50,
 ) -> BenchmarkResult:
-    """Run sequential queries and measure per-request latency."""
+    """Run sequential queries and measure per-request latency.
+
+    Uses a single persistent HTTP session for connection reuse.
+    """
     result = BenchmarkResult(system=system_name, query_count=len(queries))
 
-    # Warmup phase: prime caches and JIT, discard timings.
-    warmup_queries = queries[:warmup] if len(queries) >= warmup else queries
-    print(f"  [{system_name}] Warmup: {len(warmup_queries)} queries...")
-    for q in warmup_queries:
-        try:
-            search_fn(q["query"])
-        except Exception:
-            pass
+    # A single session reuses the underlying TCP connection across all
+    # requests (HTTP keep-alive), avoiding per-call connection setup cost.
+    with requests.Session() as session:
+        bound_fn = lambda q: search_fn(q, session=session)
 
-    # Measurement phase.
-    print(f"  [{system_name}] Latency: {len(queries)} queries (sequential)...")
-    for q in queries:
-        t0 = time.perf_counter()
-        try:
-            res = search_fn(q["query"])
-            elapsed_ms = (time.perf_counter() - t0) * 1000.0
-            result.latencies_ms.append(elapsed_ms)
-            result.total_hits += res["total_hits"]
-        except Exception as e:
-            elapsed_ms = (time.perf_counter() - t0) * 1000.0
-            result.latencies_ms.append(elapsed_ms)
-            result.errors += 1
+        # Warmup phase: prime caches and JIT, discard timings.
+        warmup_queries = queries[:warmup] if len(queries) >= warmup else queries
+        print(f"  [{system_name}] Warmup: {len(warmup_queries)} queries...")
+        for q in warmup_queries:
+            try:
+                bound_fn(q["query"])
+            except Exception:
+                pass
+
+        # Measurement phase.
+        print(f"  [{system_name}] Latency: {len(queries)} queries (sequential)...")
+        for q in queries:
+            t0 = time.perf_counter()
+            try:
+                res = bound_fn(q["query"])
+                elapsed_ms = (time.perf_counter() - t0) * 1000.0
+                result.latencies_ms.append(elapsed_ms)
+                result.total_hits += res["total_hits"]
+            except Exception:
+                elapsed_ms = (time.perf_counter() - t0) * 1000.0
+                result.latencies_ms.append(elapsed_ms)
+                result.latency_errors += 1
 
     return result
 
@@ -276,9 +363,11 @@ def run_throughput_benchmark(
     queries: list[dict],
     concurrency: int,
     duration_secs: int = 30,
-) -> float:
-    """Run concurrent queries for a fixed duration and return QPS."""
-    print(f"  [{system_name}] Throughput: {concurrency} threads for {duration_secs}s...")
+) -> tuple[float, int]:
+    """Run concurrent queries for a fixed duration. Returns (QPS, error_count)."""
+    print(
+        f"  [{system_name}] Throughput: {concurrency} threads for {duration_secs}s..."
+    )
 
     # Thread-safe counters: plain int increment is not guaranteed atomic
     # across all Python implementations, so we guard with a lock.
@@ -291,13 +380,17 @@ def run_throughput_benchmark(
         nonlocal completed, errors
         local_completed = 0
         local_errors = 0
-        while time.monotonic() < deadline:
-            q = random.choice(queries)
-            try:
-                search_fn(q["query"])
-                local_completed += 1
-            except Exception:
-                local_errors += 1
+        # Each thread gets its own session so TCP connections are reused
+        # within the thread (keep-alive) without sharing across threads.
+        with requests.Session() as session:
+            bound_fn = lambda q: search_fn(q, session=session)
+            while time.monotonic() < deadline:
+                q = random.choice(queries)
+                try:
+                    bound_fn(q["query"])
+                    local_completed += 1
+                except Exception:
+                    local_errors += 1
         with lock:
             completed += local_completed
             errors += local_errors
@@ -310,8 +403,10 @@ def run_throughput_benchmark(
 
     elapsed = time.monotonic() - t0
     qps = completed / elapsed if elapsed > 0 else 0
-    print(f"    Completed {completed:,} queries in {elapsed:.1f}s ({qps:,.0f} QPS, {errors} errors)")
-    return qps
+    print(
+        f"    Completed {completed:,} queries in {elapsed:.1f}s ({qps:,.0f} QPS, {errors} errors)"
+    )
+    return qps, errors
 
 
 def print_report(results: list[BenchmarkResult], throughputs: dict[str, float]):
@@ -321,8 +416,10 @@ def print_report(results: list[BenchmarkResult], throughputs: dict[str, float]):
     print("=" * 72)
 
     # Header.
-    print(f"{'System':<20} {'p50':>8} {'p95':>8} {'p99':>8} {'Mean':>8} {'Errors':>8} {'QPS':>10}")
-    print("-" * 72)
+    print(
+        f"{'System':<20} {'p50':>8} {'p95':>8} {'p99':>8} {'Mean':>8} {'Lat.Err':>8} {'Tput.Err':>9} {'QPS':>10}"
+    )
+    print("-" * 80)
 
     for r in results:
         qps = throughputs.get(r.system, r.qps)
@@ -332,11 +429,12 @@ def print_report(results: list[BenchmarkResult], throughputs: dict[str, float]):
             f"{r.p95:>7.1f}ms "
             f"{r.p99:>7.1f}ms "
             f"{r.mean:>7.1f}ms "
-            f"{r.errors:>8} "
+            f"{r.latency_errors:>8} "
+            f"{r.throughput_errors:>9} "
             f"{qps:>9.0f}"
         )
 
-    print("-" * 72)
+    print("-" * 80)
 
     # Comparison.
     if len(results) == 2:
@@ -361,41 +459,54 @@ def print_report(results: list[BenchmarkResult], throughputs: dict[str, float]):
 def main():
     parser = argparse.ArgumentParser(description="FTS benchmark runner")
     parser.add_argument(
-        "--tantylla-url", type=str, default=None,
-        help="Tantylla gateway URL (e.g., http://localhost:8080)"
+        "--tantylla-url",
+        type=str,
+        default=None,
+        help="Tantylla gateway URL (e.g., http://localhost:8080)",
     )
     parser.add_argument(
-        "--elasticsearch-url", type=str, default=None,
-        help="Elasticsearch URL (e.g., http://localhost:9200)"
+        "--elasticsearch-url",
+        type=str,
+        default=None,
+        help="Elasticsearch URL (e.g., http://localhost:9200)",
     )
     parser.add_argument(
-        "--queries", type=int, default=1000,
-        help="Number of search queries for the latency benchmark"
+        "--queries",
+        type=int,
+        default=1000,
+        help="Number of search queries for the latency benchmark",
     )
     parser.add_argument(
-        "--concurrency", type=int, default=10,
-        help="Number of concurrent threads for the throughput benchmark"
+        "--concurrency",
+        type=int,
+        default=10,
+        help="Number of concurrent threads for the throughput benchmark",
     )
     parser.add_argument(
-        "--throughput-duration", type=int, default=30,
-        help="Duration of the throughput benchmark in seconds"
+        "--throughput-duration",
+        type=int,
+        default=30,
+        help="Duration of the throughput benchmark in seconds",
     )
     parser.add_argument(
-        "--limit", type=int, default=10,
-        help="Number of results per query"
+        "--limit", type=int, default=10, help="Number of results per query"
     )
     parser.add_argument(
-        "--warmup", type=int, default=50,
-        help="Number of warmup queries (not measured)"
+        "--warmup", type=int, default=50, help="Number of warmup queries (not measured)"
     )
     parser.add_argument(
-        "--seed", type=int, default=42,
-        help="Random seed for reproducible query generation"
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed for reproducible query generation",
     )
     args = parser.parse_args()
 
     if not args.tantylla_url and not args.elasticsearch_url:
-        print("ERROR: at least one of --tantylla-url or --elasticsearch-url is required", file=sys.stderr)
+        print(
+            "ERROR: at least one of --tantylla-url or --elasticsearch-url is required",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     random.seed(args.seed)
@@ -414,43 +525,56 @@ def main():
     # --- Tantylla ---
     if args.tantylla_url:
         print(f"Benchmarking Tantylla at {args.tantylla_url}")
-        search_fn = lambda q: search_tantylla(args.tantylla_url, q, args.limit)
+        search_fn = lambda q, session=None: search_tantylla(
+            args.tantylla_url, q, args.limit, session=session
+        )
 
         lat = run_latency_benchmark("Tantylla", search_fn, queries, warmup=args.warmup)
         results.append(lat)
 
-        qps = run_throughput_benchmark(
-            "Tantylla", search_fn, queries,
+        qps, tput_errors = run_throughput_benchmark(
+            "Tantylla",
+            search_fn,
+            queries,
             concurrency=args.concurrency,
             duration_secs=args.throughput_duration,
         )
         throughputs["Tantylla"] = qps
+        lat.throughput_errors = tput_errors
         print()
 
     # --- Elasticsearch ---
     if args.elasticsearch_url:
         print(f"Benchmarking Elasticsearch at {args.elasticsearch_url}")
-        search_fn = lambda q: search_elasticsearch(args.elasticsearch_url, q, args.limit)
+        search_fn = lambda q, session=None: search_elasticsearch(
+            args.elasticsearch_url, q, args.limit, session=session
+        )
 
-        lat = run_latency_benchmark("Elasticsearch", search_fn, queries, warmup=args.warmup)
+        lat = run_latency_benchmark(
+            "Elasticsearch", search_fn, queries, warmup=args.warmup
+        )
         results.append(lat)
 
-        qps = run_throughput_benchmark(
-            "Elasticsearch", search_fn, queries,
+        qps, tput_errors = run_throughput_benchmark(
+            "Elasticsearch",
+            search_fn,
+            queries,
             concurrency=args.concurrency,
             duration_secs=args.throughput_duration,
         )
         throughputs["Elasticsearch"] = qps
+        lat.throughput_errors = tput_errors
         print()
 
     print_report(results, throughputs)
 
     # Dump raw latencies to JSON for further analysis.
-    raw_path = "benchmark-results.json"
+    raw_path = "data/output/benchmark-results.json"
     raw = {
         r.system: {
             "latencies_ms": r.latencies_ms,
-            "errors": r.errors,
+            "latency_errors": r.latency_errors,
+            "throughput_errors": r.throughput_errors,
             "total_hits": r.total_hits,
             "p50": r.p50,
             "p95": r.p95,

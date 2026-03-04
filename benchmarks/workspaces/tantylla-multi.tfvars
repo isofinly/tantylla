@@ -1,19 +1,13 @@
-# =========================================================================
-# Workspace: tantylla-multi
-# =========================================================================
-#
 # Multi-node Tantylla benchmark: 2 search nodes to demonstrate hash-
-# partitioned horizontal scaling. Index data is split across nodes via
-# hash(PK) % N, and the gateway scatter-gathers search results.
-#
-# Estimated memory: ScyllaDB 1 GB + 2 × Node 512 MB + Ingestor 256 MB
-#                   + Gateway 256 MB ≈ 2.5 GB total.
+# partitioned horizontal scaling.
+# Index data is split across nodes via hash(PK) % N,
+# and the gateway scatter-gathers search results.
 #
 # Usage:
 #   tofu workspace new tantylla-multi
 #   tofu apply -var-file=workspaces/tantylla-multi.tfvars
 
-enable_tantylla  = true
+enable_tantylla   = true
 enable_competitor = false
 
 tantylla_node_count     = 2

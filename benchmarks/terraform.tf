@@ -1,11 +1,3 @@
-# =========================================================================
-# Provider Requirements
-# =========================================================================
-#
-# We use the kreuzwerker/docker provider to manage containers locally.
-# OpenTofu workspaces drive different benchmarking configurations via
-# per-workspace .tfvars files in workspaces/.
-#
 # Usage:
 #   tofu init
 #   tofu workspace new tantylla-single

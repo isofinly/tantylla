@@ -1,7 +1,3 @@
-# =========================================================================
-# Tantylla FTS Stack
-# =========================================================================
-#
 # Conditional on var.enable_tantylla.
 #
 # Components:
@@ -140,10 +136,9 @@ resource "docker_container" "tantylla_ingestor" {
 
   restart = "unless-stopped"
 
-  # The ingestor needs ScyllaDB to be healthy and search nodes to be
-  # running so it can forward CDC events via gRPC.
   depends_on = [
     docker_container.scylla,
+    terraform_data.benchmark_schema,
     docker_container.tantylla_node,
   ]
 }
@@ -188,7 +183,6 @@ resource "docker_container" "tantylla_gateway" {
 
   restart = "unless-stopped"
 
-  # The gateway needs search nodes running to scatter-gather queries.
   depends_on = [
     docker_container.tantylla_node,
   ]

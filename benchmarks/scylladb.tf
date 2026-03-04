@@ -1,11 +1,3 @@
-# =========================================================================
-# ScyllaDB: Shared Database
-# =========================================================================
-#
-# Both the tantylla stack and the competitor stack read CDC events from
-# this single ScyllaDB instance, ensuring the comparison is fair: both
-# systems receive identical change streams.
-#
 # Developer mode is enabled to simplify filesystem requirements in
 # Docker. This disables commitlog fsync and some other production
 # guards. Since both stacks use the same ScyllaDB, this does not
@@ -31,7 +23,7 @@ resource "docker_container" "scylla" {
     "--smp", tostring(var.scylla_smp),
     "--memory", "${var.scylla_memory_mb}M",
     "--developer-mode", "1",
-    "--overprovisioned",
+    "--overprovisioned", "1",
   ]
 
   ports {
@@ -59,10 +51,22 @@ resource "docker_container" "scylla" {
     retries  = 30
   }
 
-  # Block until the healthcheck passes. Downstream containers (ingestor,
-  # Kafka Connect) depend on ScyllaDB being fully initialised.
   wait         = true
   wait_timeout = 180
 
   restart = "no"
+}
+
+# =========================================================================
+# Schema Initialisation
+# =========================================================================
+
+resource "terraform_data" "benchmark_schema" {
+  triggers_replace = [docker_container.scylla.id]
+
+  provisioner "local-exec" {
+    command = "cqlsh localhost ${var.scylla_host_port} --file '${path.module}/data/input/benchmark-schema.cql'"
+  }
+
+  depends_on = [docker_container.scylla]
 }

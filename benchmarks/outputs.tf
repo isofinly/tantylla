@@ -49,31 +49,3 @@ output "estimated_memory_mb" {
   description = "Estimated total memory consumption across all containers (MB)"
   value       = local.estimated_memory_mb
 }
-
-# -------------------------------------------------------------------------
-# Post-deployment commands
-# -------------------------------------------------------------------------
-
-output "next_steps" {
-  description = "Commands to run after `tofu apply`"
-  value = join("\n", compact([
-    "# 1. Wait for all services to be healthy:",
-    "bash scripts/wait-for-services.sh ${var.scylla_host_port} ${var.enable_tantylla ? local.tantylla_gateway_host_port : 0} ${var.enable_competitor ? var.es_host_port : 0}",
-    "",
-    "# 2. Create the benchmark schema:",
-    "cqlsh localhost ${var.scylla_host_port} -f data/benchmark-schema.cql",
-    "",
-    var.enable_competitor ? "# 3. Register Kafka Connect connectors:" : null,
-    var.enable_competitor ? "bash scripts/setup-connectors.sh localhost:${var.kafka_connect_host_port} ${local.scylla_container_name}:${local.scylla_internal_port} ${local.es_container_name}:${local.es_internal_port}" : null,
-    var.enable_competitor ? "" : null,
-    "# ${var.enable_competitor ? "4" : "3"}. Seed benchmark data:",
-    "pip install -r scripts/requirements.txt",
-    "python scripts/seed-data.py --host localhost --port ${var.scylla_host_port} --count ${local.dataset_doc_count}",
-    "",
-    "# ${var.enable_competitor ? "5" : "4"}. Run the benchmark:",
-    "python scripts/run-benchmark.py \\",
-    var.enable_tantylla ? "  --tantylla-url http://localhost:${local.tantylla_gateway_host_port} \\" : null,
-    var.enable_competitor ? "  --elasticsearch-url http://localhost:${var.es_host_port} \\" : null,
-    "  --queries 1000 --concurrency 10",
-  ]))
-}

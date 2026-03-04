@@ -1,19 +1,9 @@
-# =========================================================================
-# Workspace: tantylla-single
-# =========================================================================
-#
 # Baseline Tantylla benchmark: single search node, no competitor stack.
-# Use this to establish Tantylla's baseline latency and throughput on
-# constrained resources before comparing against the competitor.
-#
-# Estimated memory: ScyllaDB 1 GB + Node 512 MB + Ingestor 256 MB
-#                   + Gateway 256 MB ≈ 2 GB total.
-#
 # Usage:
 #   tofu workspace new tantylla-single
 #   tofu apply -var-file=workspaces/tantylla-single.tfvars
 
-enable_tantylla  = true
+enable_tantylla   = true
 enable_competitor = false
 
 tantylla_node_count     = 1

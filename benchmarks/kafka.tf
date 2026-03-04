@@ -1,25 +1,8 @@
-# =========================================================================
-# Kafka + Kafka Connect (Competitor Stack)
-# =========================================================================
-#
 # Conditional on var.enable_competitor.
 #
 # Pipeline:
 #   ScyllaDB CDC log --> ScyllaDB CDC Source Connector --> Kafka topic
 #                        --> Elasticsearch Sink Connector --> Elasticsearch
-#
-# We use Confluent Platform images for Kafka (KRaft mode, no ZooKeeper)
-# and Kafka Connect. A custom Connect image adds the ScyllaDB CDC Source
-# and Elasticsearch Sink connector plugins (see docker/kafka-connect/).
-#
-# NOTE on Apple Silicon: Confluent images may run under Rosetta 2 on
-# M-series Macs. This adds ~10-15% overhead to the competitor stack.
-# Tantylla runs natively (ARM64 Rust binary in Debian ARM64 image).
-# The benchmark report should note this asymmetry.
-
-# =========================================================================
-# Kafka: Single-node KRaft broker
-# =========================================================================
 
 resource "docker_image" "kafka" {
   count        = var.enable_competitor ? 1 : 0
@@ -174,5 +157,6 @@ resource "docker_container" "kafka_connect" {
   depends_on = [
     docker_container.kafka[0],
     docker_container.scylla,
+    terraform_data.benchmark_schema,
   ]
 }

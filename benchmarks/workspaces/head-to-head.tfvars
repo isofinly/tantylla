@@ -1,28 +1,12 @@
-# =========================================================================
-# Workspace: head-to-head
-# =========================================================================
-#
 # Both stacks running simultaneously against a shared ScyllaDB instance.
 # Both Tantylla's ingestor and the Kafka CDC connector consume the same
 # CDC log independently, so both systems index identical data.
-#
-# This workspace enables the most direct comparison: same data, same
-# timing, same machine. Trade-off is tighter resource constraints since
-# everything shares 18 GB.
-#
-# Estimated memory: ScyllaDB 768 MB + Tantylla (node 384 + ingestor 256
-#   + gateway 256) + Kafka 768 MB + Kafka Connect 768 MB
-#   + Elasticsearch 1.5 GB ≈ 4.7 GB total.
-#
-# Resource budgets are reduced compared to standalone workspaces to fit
-# both stacks. This means absolute numbers will be lower for both —
-# the relative comparison is what matters.
 #
 # Usage:
 #   tofu workspace new head-to-head
 #   tofu apply -var-file=workspaces/head-to-head.tfvars
 
-enable_tantylla  = true
+enable_tantylla   = true
 enable_competitor = true
 
 # Tantylla: single node with reduced memory to share resources.

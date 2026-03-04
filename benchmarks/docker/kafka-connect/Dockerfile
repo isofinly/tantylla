@@ -1,28 +1,51 @@
-# =========================================================================
-# Kafka Connect: ScyllaDB CDC Source + Elasticsearch Sink
-# =========================================================================
-#
-# Extends the Confluent Kafka Connect base image with two connector
-# plugins that form the competitor benchmark pipeline:
-#
-#   ScyllaDB (CDC log) --> Kafka Connect --> Kafka --> Kafka Connect --> Elasticsearch
-#
-# The ScyllaDB CDC Source Connector reads the CDC log tables directly
-# (no Debezium involved) and produces change events to Kafka topics.
-# The Elasticsearch Sink Connector consumes those topics and indexes
-# documents into Elasticsearch.
-#
-# NOTE: The Confluent image may run under Rosetta 2 on Apple Silicon.
-# This adds overhead to the competitor stack; tantylla runs natively.
-# Both stacks share the same ScyllaDB instance so the CDC source is
-# identical — the comparison measures the indexing + search pipeline.
+FROM confluentinc/cp-kafka-connect:8.2.0
 
-FROM confluentinc/cp-kafka-connect:7.7.1
+USER root
+RUN set -eux; \
+    # Install only missing tooling to avoid conflicts with minimal curl packages
+    if command -v microdnf >/dev/null 2>&1; then \
+        if ! command -v curl >/dev/null 2>&1; then microdnf install -y curl; fi; \
+        microdnf install -y unzip ca-certificates; \
+        microdnf clean all; \
+    elif command -v yum >/dev/null 2>&1; then \
+        if ! command -v curl >/dev/null 2>&1; then yum install -y curl; fi; \
+        yum install -y unzip ca-certificates; \
+        yum clean all; \
+    else \
+        echo "no supported package manager found" >&2; \
+        exit 127; \
+    fi
 
-# Install ScyllaDB CDC Source Connector
-RUN confluent-hub install --no-prompt \
-    scylladb/scylla-cdc-source-connector:1.1.2
+RUN set -eux; \
+    SCYLLA_VER=2.0.0; \
+    MAVEN_JAR_URL="https://repo1.maven.org/maven2/com/scylladb/scylla-cdc-source-connector/${SCYLLA_VER}/scylla-cdc-source-connector-${SCYLLA_VER}-jar-with-dependencies.jar"; \
+    dest_dir=/usr/share/java/scylla-cdc-source-connector; \
+    mkdir -p "$dest_dir"; \
+    echo "Downloading Scylla CDC connector ${SCYLLA_VER} from Maven Central"; \
+    curl -fSL -o "$dest_dir/scylla-cdc-source-connector-${SCYLLA_VER}-jar-with-dependencies.jar" "$MAVEN_JAR_URL"; \
+    # verify download
+    if [ ! -s "$dest_dir/scylla-cdc-source-connector-${SCYLLA_VER}-jar-with-dependencies.jar" ]; then \
+        echo "Failed to download valid Scylla CDC connector JAR from ${MAVEN_JAR_URL}" >&2; \
+        exit 1; \
+    fi
 
-# Install Elasticsearch Sink Connector
-RUN confluent-hub install --no-prompt \
-    confluentinc/kafka-connect-elasticsearch:14.2.2
+COPY assets /tmp/assets
+
+RUN set -eux; \
+    if ls /tmp/assets/kafka-connect-elasticsearch*.zip >/dev/null 2>&1; then \
+        echo "Installing Elasticsearch connector from build-context asset"; \
+        for f in /tmp/assets/kafka-connect-elasticsearch*.zip; do \
+            unzip "$f" -d /usr/share/java/; \
+        done; \
+    else \
+        echo "No pre-staged Elasticsearch connector found; attempting confluent-hub install"; \
+        confluent-hub install --no-prompt confluentinc/kafka-connect-elasticsearch:latest || true; \
+        if curl --output /dev/null --silent --head --fail "https://d1i4a15mxbxib1.cloudfront.net/api/plugins/confluentinc/kafka-connect-elasticsearch/latest/download"; then \
+            echo "Falling back to direct CDN download for elasticsearch connector"; \
+            curl -L -o /tmp/kc-elastic.zip "https://d1i4a15mxbxib1.cloudfront.net/api/plugins/confluentinc/kafka-connect-elasticsearch/latest/download"; \
+            unzip /tmp/kc-elastic.zip -d /usr/share/java/; \
+            rm -f /tmp/kc-elastic.zip; \
+        else \
+            echo "Elasticsearch connector not installed — continuing without it"; \
+        fi; \
+    fi

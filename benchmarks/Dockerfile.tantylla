@@ -1,23 +1,3 @@
-# =========================================================================
-# Tantylla: Multi-stage Docker Build
-# =========================================================================
-#
-# Builds all three tantylla binaries (node, ingestor, gateway) from the
-# Rust workspace. The build context MUST be the project root (parent of
-# benchmarks/) so that `COPY rust/ ...` resolves correctly.
-#
-# Build context: <project-root>
-# Dockerfile:    benchmarks/Dockerfile.tantylla
-#
-# For faster rebuilds, consider adding a .dockerignore at the project
-# root that excludes scylladb/, rust/target/, and .git/.
-
-# -------------------------------------------------------------------------
-# Stage 1: Compile release binaries
-# -------------------------------------------------------------------------
-# We pin the Rust version to match the project's MSRV (1.90).
-# protobuf-compiler is needed for tonic-prost-build in common/build.rs.
-
 FROM rust:1.90-slim-bookworm AS builder
 
 RUN apt-get update \
@@ -29,20 +9,12 @@ RUN apt-get update \
 
 WORKDIR /app
 
-# Copy only the Rust workspace — not the scylladb/ submodule or other
-# top-level directories that would bloat the image layers.
 COPY rust/ ./
 
 RUN cargo build --release \
     -p tantylla-node \
     -p tantylla-ingestor \
     -p tantylla-gateway
-
-# -------------------------------------------------------------------------
-# Stage 2: Minimal runtime image
-# -------------------------------------------------------------------------
-# Debian bookworm-slim matches the builder's libc. We need libssl3 for
-# the ingestor's ScyllaDB driver (TLS handshake during initial connect).
 
 FROM debian:bookworm-slim
 
