@@ -74,6 +74,12 @@ impl IndexService for IndexServiceService {
         let limit = req.limit;
         let offset = req.offset;
 
+        if limit == 0 {
+            return Err(Status::invalid_argument(
+                "Limit must be strictly greater than 0",
+            ));
+        }
+
         tracing::debug!(
             target: "test_event",
             source = %TestEventSource::Node,
