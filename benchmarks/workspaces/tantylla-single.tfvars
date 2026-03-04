@@ -16,8 +16,8 @@ scylla_smp       = 2
 # Aggressive CDC polling for benchmark responsiveness.
 # Safety interval 5s + sleep 1s → ~6s worst-case index lag.
 tantylla_commit_interval_secs = 5
-tantylla_safety_interval_ms   = 5000
-tantylla_sleep_interval_ms    = 1000
+tantylla_safety_interval_ms   = 30000
+tantylla_sleep_interval_ms    = 10000
 
 dataset_scale    = "medium"
 benchmark_prefix = "bench"

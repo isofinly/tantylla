@@ -25,8 +25,8 @@ es_memory_mb = 1536
 es_heap_mb   = 768
 
 tantylla_commit_interval_secs = 5
-tantylla_safety_interval_ms   = 5000
-tantylla_sleep_interval_ms    = 1000
+tantylla_safety_interval_ms   = 30000
+tantylla_sleep_interval_ms    = 10000
 
 dataset_scale    = "medium"
 benchmark_prefix = "bench"
