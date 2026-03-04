@@ -81,6 +81,13 @@ struct Args {
     #[cfg(debug_assertions)]
     #[arg(long, help = "UDP port for debug test events")]
     test_event_port: Option<u16>,
+
+    #[cfg(debug_assertions)]
+    #[arg(
+        long,
+        help = "Override CDC start timestamp (microseconds since Unix epoch)"
+    )]
+    start_timestamp_micros: Option<i64>,
 }
 
 static LOGGER_GUARD: OnceLock<WorkerGuard> = OnceLock::new();
@@ -88,6 +95,25 @@ static LOGGER_GUARD: OnceLock<WorkerGuard> = OnceLock::new();
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+
+    #[cfg(debug_assertions)]
+    let start_timestamp = if let Some(micros) = args.start_timestamp_micros {
+        chrono::Duration::microseconds(micros)
+    } else {
+        chrono::Duration::from_std(
+            std::time::SystemTime::now()
+                .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                .expect("system time is after Unix epoch"),
+        )
+        .expect("system time fits in chrono::Duration")
+    };
+    #[cfg(not(debug_assertions))]
+    let start_timestamp = chrono::Duration::from_std(
+        std::time::SystemTime::now()
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .expect("system time is after Unix epoch"),
+    )
+    .expect("system time fits in chrono::Duration");
 
     #[cfg(debug_assertions)]
     let test_event_port = args.test_event_port;
@@ -142,13 +168,6 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    tracing::debug!(
-        target: "test_event",
-        source = %TestEventSource::Ingestor,
-        event = %TestEvent::Startup,
-        table = format!("{}.{}", keyspace, table)
-    );
-
     let batch_service = Arc::new(Service::new(format!("{}.{}", keyspace, table)));
 
     let router = router::core::Router::new(
@@ -184,8 +203,16 @@ async fn main() -> anyhow::Result<()> {
         .should_save_progress(true)
         .should_load_progress(true)
         .checkpoint_saver(cp_saver)
+        .start_timestamp(start_timestamp)
         .build()
         .await?;
+
+    tracing::debug!(
+        target: "test_event",
+        source = %TestEventSource::Ingestor,
+        event = %TestEvent::Startup,
+        table = format!("{}.{}", keyspace, table)
+    );
 
     info!("Starting CDC Log Reader for {}.{}", keyspace, table);
     tokio::select! {

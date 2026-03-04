@@ -106,9 +106,21 @@ pub(super) async fn spawn_ingestors(
 ) -> anyhow::Result<Vec<ServiceProcess>> {
     let mut processes = Vec::new();
     for _ in 0..count {
-        let process =
-            spawn_single_ingestor(scylla, keyspace, table_name, node_addrs, instrumentation)
-                .await?;
+        // Capture the start timestamp once per ingestor spawn so it predates
+        // any test data insertion that follows.
+        let start_ts_micros = std::time::SystemTime::now()
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .expect("system time is after Unix epoch")
+            .as_micros() as i64;
+        let process = spawn_single_ingestor(
+            scylla,
+            keyspace,
+            table_name,
+            node_addrs,
+            instrumentation,
+            Some(start_ts_micros),
+        )
+        .await?;
         processes.push(process);
     }
     Ok(processes)
@@ -126,6 +138,7 @@ pub(super) async fn spawn_single_ingestor(
     table_name: &str,
     node_addrs: &[String],
     instrumentation: &InstrumentationConfig,
+    start_timestamp_micros: Option<i64>,
 ) -> anyhow::Result<ServiceProcess> {
     let nodes_arg = node_addrs.join(",");
     let scylla_arg = scylla.contact_points.join(",");
@@ -143,6 +156,15 @@ pub(super) async fn spawn_single_ingestor(
         "--sleep-interval".to_string(),
         "500".to_string(),
     ];
+
+    // The start timestamp is captured before process exec so that the CDC
+    // reader's query window predates any test data insertions (initial spawn).
+    // On restart the flag is omitted; the ingestor loads progress from its
+    // ScyllaDB checkpoint table instead.
+    if let Some(micros) = start_timestamp_micros {
+        args.push("--start-timestamp-micros".to_string());
+        args.push(micros.to_string());
+    }
 
     if instrumentation.enabled
         && let Some(event_port) = instrumentation.event_port
