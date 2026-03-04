@@ -65,6 +65,7 @@
               cassandra
               cqlls
               cargo-deny
+              opentofu
             ]
             ++ protoTools;
 
