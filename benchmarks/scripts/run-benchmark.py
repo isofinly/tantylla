@@ -223,33 +223,69 @@ def search_elasticsearch(
     Elasticsearch Sink Connector derives the target index name from the Kafka
     topic name, and the ScyllaDB CDC source connector produces events on topic
     ``scylla.benchmark.products`` (topic_prefix=scylla + keyspace.table).
+
+    Fields searched match Tantylla's ``_TANTIVY_TEXT_FIELDS`` exactly so that
+    both systems receive an equivalent workload.  The CDC connector wraps each
+    column in a ``{"value": ...}`` envelope under the ``after`` key, so the
+    actual ES field paths are:
+        after.name.value, after.description.value, after.brand.value,
+        after.category.value, after.subcategory.value
+
+    NOTE: ``track_total_hits: true`` is required to get an exact hit count;
+    without it ES may return a ``"relation": "gte"`` approximation or cap the
+    count at 10,000, both of which yield a misleadingly low ``total_hits``.
+
+    NOTE: Memory budgets differ between the two systems (ES: 2,048 MB /
+    1,024 MB JVM heap + ~1 GB OS page cache for Lucene mmap; Tantylla: 512 MB).
+    This is an intentional asymmetry in the current benchmark configuration and
+    should be taken into account when interpreting QPS comparisons.
     """
     req = session or requests
+
+    # The ScyllaDB CDC Source Connector wraps each column value in a
+    # ``{"value": "..."}`` envelope under the ``after`` key, so the actual
+    # indexed field paths are ``after.<column>.value``, not flat top-level
+    # names.  These five paths mirror ``_TANTIVY_TEXT_FIELDS`` exactly,
+    # ensuring both engines receive an equivalent per-query workload.
+    _ES_TEXT_FIELDS = [
+        "after.name.value",
+        "after.description.value",
+        "after.brand.value",
+        "after.category.value",
+        "after.subcategory.value",
+    ]
+
     # Use multi_match to search across all text fields, similar to how
     # Tantivy's QueryParser searches the JSON document field.
     body = {
         "query": {
             "multi_match": {
                 "query": query.strip('"'),
-                "fields": ["name", "description", "brand"],
+                "fields": _ES_TEXT_FIELDS,
                 "type": "best_fields",
             }
         },
         "size": limit,
+        # Force an exact hit count so total_hits is populated correctly.
+        # Without this ES caps counting at 10,000 and may return 0 for
+        # some response shapes when the threshold is not reached.
+        "track_total_hits": True,
     }
 
-    # For phrase queries, use match_phrase instead.
+    # For phrase queries, use match_phrase instead of best_fields so that
+    # token order is enforced, matching Tantivy phrase-query semantics.
     if query.startswith('"') and query.endswith('"'):
         phrase = query.strip('"')
         body = {
             "query": {
                 "multi_match": {
                     "query": phrase,
-                    "fields": ["name", "description", "brand"],
+                    "fields": _ES_TEXT_FIELDS,
                     "type": "phrase",
                 }
             },
             "size": limit,
+            "track_total_hits": True,
         }
 
     resp = req.post(
