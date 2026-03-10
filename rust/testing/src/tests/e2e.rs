@@ -165,6 +165,7 @@ async fn e2e_gateway_failure_on_missing_node() -> Result<()> {
                         offset: 0,
                         consistency: 2,
                         default_fields: vec![],
+                        facet_fields: vec![],
                     })
                     .await;
 
@@ -362,6 +363,7 @@ async fn e2e_cdc_set_element_removal_updates_search_index() -> Result<()> {
                             offset: 0,
                             consistency: 1,
                             default_fields: vec![],
+                            facet_fields: vec![],
                         })
                         .await
                         .context("searching for removed tag")?;
@@ -461,6 +463,7 @@ async fn e2e_cdc_set_addition_indexes_added_label() -> Result<()> {
                             offset: 0,
                             consistency: 1,
                             default_fields: vec![],
+                            facet_fields: vec![],
                         })
                         .await
                         .context("searching for combined legacy and overridden labels")?;
@@ -582,6 +585,7 @@ async fn e2e_row_delete_removes_single_clustering_row() -> Result<()> {
                             offset: 0,
                             consistency: 1,
                             default_fields: vec![],
+                            facet_fields: vec![],
                         })
                         .await
                         .context("searching for removed order")?;
@@ -592,6 +596,7 @@ async fn e2e_row_delete_removes_single_clustering_row() -> Result<()> {
                             offset: 0,
                             consistency: 1,
                             default_fields: vec![],
+                            facet_fields: vec![],
                         })
                         .await
                         .context("searching for kept order")?;
@@ -698,6 +703,7 @@ async fn e2e_range_delete_removes_rows_within_bounds() -> Result<()> {
                             offset: 0,
                             consistency: 1,
                             default_fields: vec![],
+                            facet_fields: vec![],
                         })
                         .await
                         .context("searching for range-deleted middle row")?;
@@ -794,6 +800,7 @@ async fn e2e_partition_key_delete_removes_single_primary_key_row() -> Result<()>
                             offset: 0,
                             consistency: 1,
                             default_fields: vec![],
+                            facet_fields: vec![],
                         })
                         .await
                         .context("searching for deleted single-key row")?;
@@ -902,6 +909,7 @@ async fn e2e_partition_delete_removes_all_rows_for_partition() -> Result<()> {
                             offset: 0,
                             consistency: 1,
                             default_fields: vec![],
+                            facet_fields: vec![],
                         })
                         .await
                         .context("searching for first partition row")?;
@@ -912,6 +920,7 @@ async fn e2e_partition_delete_removes_all_rows_for_partition() -> Result<()> {
                             offset: 0,
                             consistency: 1,
                             default_fields: vec![],
+                            facet_fields: vec![],
                         })
                         .await
                         .context("searching for second partition row")?;
@@ -1026,6 +1035,7 @@ async fn e2e_checkpoint_not_advanced_on_partial_flush_failure() -> Result<()> {
                             offset: 0,
                             consistency: 1,
                             default_fields: vec![],
+                            facet_fields: vec![],
                         })
                         .await
                         .context("polling gateway for target documents")?;
@@ -1120,6 +1130,7 @@ async fn e2e_fts_phrase_search() -> Result<()> {
                         offset: 0,
                         consistency: 1,
                         default_fields: vec![],
+                        facet_fields: vec![],
                     })
                     .await
                     .context("phrase search")?;
@@ -1207,6 +1218,7 @@ async fn e2e_fts_fuzzy_search() -> Result<()> {
                         offset: 0,
                         consistency: 1,
                         default_fields: vec![],
+                        facet_fields: vec![],
                     })
                     .await
                     .context("fuzzy search")?;
@@ -1298,6 +1310,7 @@ async fn e2e_fts_numeric_range() -> Result<()> {
                         offset: 0,
                         consistency: 1,
                         default_fields: vec![],
+                        facet_fields: vec![],
                     })
                     .await
                     .context("numeric range search")?;
@@ -1376,6 +1389,7 @@ async fn e2e_fts_plain_keyword_with_default_fields() -> Result<()> {
                         offset: 0,
                         consistency: 1,
                         default_fields: vec!["title".to_string(), "body".to_string()],
+                        facet_fields: vec![],
                     })
                     .await
                     .context("plain keyword search with default_fields")?;
@@ -1468,6 +1482,7 @@ async fn e2e_fts_keyword_and_numeric_filter() -> Result<()> {
                         offset: 0,
                         consistency: 1,
                         default_fields: vec![],
+                        facet_fields: vec![],
                     })
                     .await
                     .context("keyword + numeric range search")?;
@@ -1571,6 +1586,7 @@ async fn e2e_fts_prefix_autocomplete() -> Result<()> {
                         offset: 0,
                         consistency: 1,
                         default_fields: vec![],
+                        facet_fields: vec![],
                     })
                     .await
                     .context("broad prefix search (wire*)")?;
@@ -1589,6 +1605,7 @@ async fn e2e_fts_prefix_autocomplete() -> Result<()> {
                         offset: 0,
                         consistency: 1,
                         default_fields: vec![],
+                        facet_fields: vec![],
                     })
                     .await
                     .context("narrow prefix search (wireless*)")?;
@@ -1710,6 +1727,7 @@ async fn e2e_fts_log_time_range_keyword() -> Result<()> {
                         offset: 0,
                         consistency: 1,
                         default_fields: vec![],
+                        facet_fields: vec![],
                     })
                     .await
                     .context("log time-range + keyword search")?;
@@ -1727,6 +1745,146 @@ async fn e2e_fts_log_time_range_keyword() -> Result<()> {
                 );
 
                 Ok(())
+            }
+            .boxed()
+        })
+        .await
+}
+
+// =========================================================================
+// FTS — Facet / aggregation search
+// =========================================================================
+//
+// Faceting lets clients retrieve per-field bucket counts without a separate
+// aggregation query. The gateway accepts `facet_fields` in the search request
+// and returns `facets` in the response. Each entry in `facets` holds a field
+// name and a list of (value, count) buckets, sorted descending by count.
+//
+// Implementation note: the node performs a second Tantivy scan over ALL
+// matching documents (via `DocSetCollector`) after the top-N `TopDocs` pass.
+// Per-field counts are accumulated from the stored JSON and returned as
+// `FacetResult` messages. The gateway merges counts from all nodes by
+// summing matching (field, value) pairs.
+//
+// We use lowercase fixture values ("electronics", "books") to avoid
+// ambiguity with Tantivy's `en_stem` tokenizer, which normalises tokens
+// before indexing but stores the original bytes verbatim in the stored field.
+
+#[tokio::test]
+async fn e2e_fts_facets() -> Result<()> {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("info")
+        .with_test_writer()
+        .try_init();
+
+    let schema = SchemaConfig::from_cql(
+        "CREATE TABLE IF NOT EXISTS {{keyspace}}.products (\
+            doc_id text PRIMARY KEY,\
+            title text,\
+            category text\
+        ) WITH cdc = {'enabled': true};",
+    );
+
+    let cluster = TestCluster::builder()
+        .with_schema(schema)
+        .with_table_name("products")
+        .enable_instrumentation(false)
+        .build()
+        .await
+        .context("building test cluster")?;
+
+    cluster
+        .scoped(|cluster| {
+            async move {
+                let gateway = cluster.gateway().context("building gateway client")?;
+
+                // Insert three products: two in "electronics", one in "books".
+                for (title, category) in [
+                    ("Wireless Headphones", "electronics"),
+                    ("Smart Speaker", "electronics"),
+                    ("Programming Book", "books"),
+                ] {
+                    let id = format!("doc-{}", Uuid::new_v4());
+                    let cql = format!(
+                        "INSERT INTO {}.{} (doc_id, title, category) VALUES ('{}', '{}', '{}')",
+                        cluster.keyspace(),
+                        cluster.table_name(),
+                        id,
+                        title,
+                        category,
+                    );
+                    cluster
+                        .session()
+                        .query_unpaged(cql, ())
+                        .await
+                        .with_context(|| {
+                            format!("inserting product '{}' in '{}'", title, category)
+                        })?;
+                }
+
+                // Wait until at least the "books" category document is indexed
+                // before we begin polling for facet results.
+                gateway
+                    .search_until_hits(&["document.category:books"], 30)
+                    .await
+                    .context("waiting for 'books' product to be indexed")?;
+
+                // Poll until all three documents are indexed AND the facet
+                // counts match the expected distribution.  The two passes
+                // (TopDocs + DocSetCollector) are both executed inside the
+                // node on every search request, so we simply retry until the
+                // counts converge.
+                let query = "document.category:electronics OR document.category:books".to_string();
+
+                for attempt in 0..40_u32 {
+                    let resp = gateway
+                        .search(&SearchRequest {
+                            query: query.clone(),
+                            limit: 10,
+                            offset: 0,
+                            consistency: 1,
+                            default_fields: vec![],
+                            facet_fields: vec!["category".to_string()],
+                        })
+                        .await
+                        .context("facet search")?;
+
+                    tracing::debug!(attempt, total_hits = resp.total_hits, "facet search poll");
+
+                    // Locate the "category" facet result from the response.
+                    let facet = resp.facets.iter().find(|f| f.field == "category");
+
+                    if let Some(facet) = facet {
+                        let electronics = facet
+                            .buckets
+                            .iter()
+                            .find(|b| b.value.to_lowercase() == "electronics")
+                            .map_or(0, |b| b.count);
+                        let books = facet
+                            .buckets
+                            .iter()
+                            .find(|b| b.value.to_lowercase() == "books")
+                            .map_or(0, |b| b.count);
+
+                        if electronics == 2 && books == 1 {
+                            return Ok(());
+                        }
+
+                        tracing::debug!(
+                            attempt,
+                            electronics,
+                            books,
+                            "facet counts not yet converged"
+                        );
+                    }
+
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                }
+
+                bail!(
+                    "facet aggregation did not converge: expected category buckets \
+                     electronics=2 and books=1 after all documents were indexed"
+                );
             }
             .boxed()
         })

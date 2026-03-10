@@ -17,12 +17,31 @@ pub struct SearchRequest {
     /// An empty vec disables the feature (legacy behaviour).
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub default_fields: Vec<String>,
+    /// Sub-field names to aggregate bucket counts over in the response.
+    /// Empty means no facets are requested.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub facet_fields: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct FacetBucket {
+    pub value: String,
+    pub count: u64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct FacetResult {
+    pub field: String,
+    pub buckets: Vec<FacetBucket>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct SearchResponse {
     pub total_hits: u64,
     pub hits: Vec<Value>,
+    /// Facet aggregation results; empty when `facet_fields` was not requested.
+    #[serde(default)]
+    pub facets: Vec<FacetResult>,
 }
 
 pub struct GatewayClient {
@@ -73,6 +92,7 @@ impl GatewayClient {
                     offset: 0,
                     consistency: 1,
                     default_fields: vec![],
+                    facet_fields: vec![],
                 };
 
                 match self.search(&req).await {

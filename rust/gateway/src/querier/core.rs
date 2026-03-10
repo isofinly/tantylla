@@ -1,9 +1,10 @@
 use crate::server::core::AppState;
 use futures::future::join_all;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::{error::Error, sync::Arc};
 use tantylla_common::indexer::{
-    SearchHit, SearchRequest, SearchResponse, search_request::Consistency,
+    FacetBucket, FacetResult, SearchHit, SearchRequest, SearchResponse, search_request::Consistency,
 };
 use tantylla_common::tracing::events::{TestEvent, TestEventSource};
 use tonic::Request;
@@ -69,6 +70,8 @@ pub async fn scatter_gather(
     let mut max_duration: u64 = 0;
     let mut failed_nodes: Vec<String> = Vec::new();
     let mut successful_nodes = 0;
+    // field_name -> value_str -> summed_count (merged across nodes)
+    let mut facets_agg: HashMap<String, HashMap<String, u64>> = HashMap::new();
 
     for (idx, res) in results.into_iter().enumerate() {
         match res {
@@ -78,6 +81,15 @@ pub async fn scatter_gather(
                 total_hits += inner.total_hits;
                 max_duration = std::cmp::max(max_duration, inner.duration_ms);
                 successful_nodes += 1;
+
+                // Merge per-node facet counts into the global aggregation map
+                // by summing bucket counts for each (field, value) pair.
+                for facet_result in inner.facets {
+                    let field_map = facets_agg.entry(facet_result.field).or_default();
+                    for bucket in facet_result.buckets {
+                        *field_map.entry(bucket.value).or_insert(0) += bucket.count;
+                    }
+                }
             }
             Err(e) => {
                 let code = e.code();
@@ -133,9 +145,27 @@ pub async fn scatter_gather(
         all_hits.into_iter().skip(offset).take(limit).collect()
     };
 
+    // Convert the merged aggregation map into the proto FacetResult list,
+    // sorted by count descending within each field.
+    let merged_facets: Vec<FacetResult> = facets_agg
+        .into_iter()
+        .map(|(field, buckets)| {
+            let mut bucket_vec: Vec<FacetBucket> = buckets
+                .into_iter()
+                .map(|(value, count)| FacetBucket { value, count })
+                .collect();
+            bucket_vec.sort_by(|a, b| b.count.cmp(&a.count));
+            FacetResult {
+                field,
+                buckets: bucket_vec,
+            }
+        })
+        .collect();
+
     Ok(SearchResponse {
         hits: paged_hits,
         total_hits,
         duration_ms: max_duration,
+        facets: merged_facets,
     })
 }

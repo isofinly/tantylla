@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::ops::Bound;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -16,7 +17,8 @@ use tantivy::schema::{
 use tantivy::{Document, Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument, Term};
 use tantylla_common::indexer::index_operation::OpType;
 use tantylla_common::indexer::{
-    CollectionDelta, IndexBatchResponse, IndexOperation, SearchHit, SearchResponse,
+    CollectionDelta, FacetBucket, FacetResult, IndexBatchResponse, IndexOperation, SearchHit,
+    SearchResponse,
 };
 use tantylla_common::tracing::events::{TestEvent, TestEventSource};
 use tracing::{debug, error, info, trace, warn};
@@ -258,6 +260,7 @@ impl Engine {
         limit: usize,
         offset: usize,
         default_fields: &[String],
+        facet_fields: &[String],
     ) -> Result<SearchResponse> {
         debug!(
             target: "test_event",
@@ -364,10 +367,102 @@ impl Engine {
 
         let time_delta_micros = now_micros() - start_micros;
 
+        // =========================================================================
+        // Facet aggregation
+        // =========================================================================
+        //
+        // When the caller requests facets we perform a second pass over ALL
+        // matching documents (not just the top-N returned) to build bucket counts
+        // for each requested field. This gives correct counts even when the result
+        // set is larger than `limit`.
+        //
+        // We re-use the same `combined_query` (which already filters by TTL) and
+        // iterate stored documents via `DocSetCollector`. The pass is O(N_matching)
+        // on stored-field retrieval; a future optimisation could switch to
+        // Tantivy's column-oriented fast fields or a custom multi-collector.
+        //
+        // Only scalar (String, Number, Bool) and flat-array-of-String field values
+        // are counted. Nested objects and null values are silently skipped.
+        let facets = if !facet_fields.is_empty() {
+            let all_docs = searcher
+                .search(&combined_query, &DocSetCollector)
+                .context("collecting docs for facet aggregation")?;
+
+            // field_name -> value_str -> count
+            let mut counts: HashMap<String, HashMap<String, u64>> = HashMap::new();
+
+            for doc_address in all_docs {
+                let retrieved_doc: TantivyDocument = searcher
+                    .doc(doc_address)
+                    .context("fetching stored doc for facet")?;
+
+                let doc_json_str = retrieved_doc.to_json(&self.schema);
+
+                if let Ok(full_val) = serde_json::from_str::<serde_json::Value>(&doc_json_str) {
+                    // Tantivy wraps the JSON field in an array in the stored
+                    // representation even though we only ever insert a single
+                    // object — hence the `arr[0]` extraction.
+                    let doc_obj = match full_val.get("document") {
+                        Some(serde_json::Value::Array(arr)) if !arr.is_empty() => arr[0].clone(),
+                        Some(other) => other.clone(),
+                        None => continue,
+                    };
+
+                    for field_name in facet_fields {
+                        let field_buckets = counts.entry(field_name.clone()).or_default();
+
+                        match doc_obj.get(field_name.as_str()) {
+                            Some(serde_json::Value::String(s)) => {
+                                *field_buckets.entry(s.clone()).or_insert(0) += 1;
+                            }
+                            Some(serde_json::Value::Number(n)) => {
+                                *field_buckets.entry(n.to_string()).or_insert(0) += 1;
+                            }
+                            Some(serde_json::Value::Bool(b)) => {
+                                *field_buckets.entry(b.to_string()).or_insert(0) += 1;
+                            }
+                            // For flat array-valued fields (e.g., `tags`),
+                            // count each string element individually so that
+                            // a document with `["a", "b"]` contributes one
+                            // count to bucket "a" and one to bucket "b".
+                            Some(serde_json::Value::Array(arr)) => {
+                                for elem in arr {
+                                    if let serde_json::Value::String(s) = elem {
+                                        *field_buckets.entry(s.clone()).or_insert(0) += 1;
+                                    }
+                                }
+                            }
+                            _ => {} // Skip null and nested objects.
+                        }
+                    }
+                }
+            }
+
+            // Convert to proto FacetResult list, sorted by count descending
+            // within each field so the most common values appear first.
+            counts
+                .into_iter()
+                .map(|(field, buckets)| {
+                    let mut bucket_vec: Vec<FacetBucket> = buckets
+                        .into_iter()
+                        .map(|(value, count)| FacetBucket { value, count })
+                        .collect();
+                    bucket_vec.sort_by(|a, b| b.count.cmp(&a.count));
+                    FacetResult {
+                        field,
+                        buckets: bucket_vec,
+                    }
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
         Ok(SearchResponse {
             hits,
             total_hits: total_hits as u64,
             duration_ms: time_delta_micros as u64,
+            facets,
         })
     }
 

@@ -94,6 +94,7 @@ impl IndexService for IndexServiceService {
             req.limit as usize,
             req.offset as usize,
             &req.default_fields,
+            &req.facet_fields,
         ) {
             Ok(response) => {
                 tracing::debug!(

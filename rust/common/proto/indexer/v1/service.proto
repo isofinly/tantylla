@@ -176,6 +176,29 @@ message SearchRequest {
   // the legacy behaviour of using the entire `document` JSON field as the
   // sole default field.
   repeated string default_fields = 5;
+
+  // List of document sub-field names (without the "document." prefix) to
+  // aggregate bucket counts over. When non-empty, the response `facets` field
+  // will contain one `FacetResult` per requested field with the unique values
+  // and their document counts across all matching documents.
+  // Empty means no aggregation is performed (no overhead).
+  repeated string facet_fields = 6;
+}
+
+// A single bucket in a facet aggregation result.
+message FacetBucket {
+  // The unique field value (as a string).
+  string value = 1;
+  // Number of matching documents that contain this value.
+  uint64 count = 2;
+}
+
+// Aggregation result for a single facet field.
+message FacetResult {
+  // The document sub-field name (without "document." prefix) that was faceted.
+  string field = 1;
+  // Buckets for this field, sorted by count descending.
+  repeated FacetBucket buckets = 2;
 }
 
 message SearchResponse {
@@ -188,6 +211,10 @@ message SearchResponse {
 
   // Duration of the search in the node (debug/monitoring).
   uint64 duration_ms = 3;
+
+  // Facet aggregation results, one per requested `facet_fields` entry.
+  // Empty when `facet_fields` was not specified in the request.
+  repeated FacetResult facets = 4;
 }
 
 message SearchHit {
