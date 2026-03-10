@@ -183,6 +183,42 @@ message SearchRequest {
   // and their document counts across all matching documents.
   // Empty means no aggregation is performed (no overhead).
   repeated string facet_fields = 6;
+
+  // Per-field boost weights for bare-keyword query expansion.
+  //
+  // When non-empty and the query string contains no explicit field prefix (`:`),
+  // the node expands each whitespace-separated token into
+  //   `(document.<f1>:<token>^<b1> OR document.<f2>:<token>^<b2> OR ...)`
+  // so that matches in high-priority fields (e.g., title) rank above matches
+  // in lower-priority fields (e.g., body) even when both contain the term.
+  //
+  // If both `boost_fields` and `default_fields` are set, `boost_fields` takes
+  // precedence for the expansion (it subsumes `default_fields` with weights).
+  // Empty means no boosted expansion is applied.
+  repeated BoostField boost_fields = 7;
+
+  // When true, the node deduplicates hits by ScyllaDB partition key before
+  // applying limit/offset, returning at most one hit per partition (the
+  // highest-scoring document in that partition). This enables "parent-child"
+  // relational queries: find the distinct parent entities (partitions) that
+  // have at least one child row matching the query predicate.
+  //
+  // Because the ingestor routes all rows of the same partition to the same
+  // node (via hash(partition_key) % N), no cross-node deduplication is needed;
+  // the gateway merges results normally.
+  //
+  // `total_hits` in the response remains the raw matching-document count.
+  // Callers can compare `hits.len()` vs `total_hits` to detect deduplication.
+  bool group_by_partition = 8;
+}
+
+// A field-name + boost-weight pair for boosted multi-field query expansion.
+message BoostField {
+  // Sub-field name without the "document." prefix (e.g., "title").
+  string field = 1;
+  // Multiplicative boost factor applied to BM25 scores for this field.
+  // Values > 1.0 promote the field; values < 1.0 demote it.
+  float boost = 2;
 }
 
 // A single bucket in a facet aggregation result.

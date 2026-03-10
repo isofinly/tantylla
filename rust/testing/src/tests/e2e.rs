@@ -1,5 +1,8 @@
 use crate::cluster::TestCluster;
-use crate::cluster::{SchemaConfig, gateway::SearchRequest};
+use crate::cluster::{
+    SchemaConfig,
+    gateway::{BoostField, SearchRequest},
+};
 use crate::trace::TraceSequence;
 use anyhow::{Context, Result, bail, ensure};
 use futures::FutureExt;
@@ -166,6 +169,8 @@ async fn e2e_gateway_failure_on_missing_node() -> Result<()> {
                         consistency: 2,
                         default_fields: vec![],
                         facet_fields: vec![],
+                        boost_fields: vec![],
+                        group_by_partition: false,
                     })
                     .await;
 
@@ -364,6 +369,8 @@ async fn e2e_cdc_set_element_removal_updates_search_index() -> Result<()> {
                             consistency: 1,
                             default_fields: vec![],
                             facet_fields: vec![],
+                            boost_fields: vec![],
+                            group_by_partition: false,
                         })
                         .await
                         .context("searching for removed tag")?;
@@ -464,6 +471,8 @@ async fn e2e_cdc_set_addition_indexes_added_label() -> Result<()> {
                             consistency: 1,
                             default_fields: vec![],
                             facet_fields: vec![],
+                            boost_fields: vec![],
+                            group_by_partition: false,
                         })
                         .await
                         .context("searching for combined legacy and overridden labels")?;
@@ -586,6 +595,8 @@ async fn e2e_row_delete_removes_single_clustering_row() -> Result<()> {
                             consistency: 1,
                             default_fields: vec![],
                             facet_fields: vec![],
+                            boost_fields: vec![],
+                            group_by_partition: false,
                         })
                         .await
                         .context("searching for removed order")?;
@@ -597,6 +608,8 @@ async fn e2e_row_delete_removes_single_clustering_row() -> Result<()> {
                             consistency: 1,
                             default_fields: vec![],
                             facet_fields: vec![],
+                            boost_fields: vec![],
+                            group_by_partition: false,
                         })
                         .await
                         .context("searching for kept order")?;
@@ -704,6 +717,8 @@ async fn e2e_range_delete_removes_rows_within_bounds() -> Result<()> {
                             consistency: 1,
                             default_fields: vec![],
                             facet_fields: vec![],
+                            boost_fields: vec![],
+                            group_by_partition: false,
                         })
                         .await
                         .context("searching for range-deleted middle row")?;
@@ -801,6 +816,8 @@ async fn e2e_partition_key_delete_removes_single_primary_key_row() -> Result<()>
                             consistency: 1,
                             default_fields: vec![],
                             facet_fields: vec![],
+                            boost_fields: vec![],
+                            group_by_partition: false,
                         })
                         .await
                         .context("searching for deleted single-key row")?;
@@ -910,6 +927,8 @@ async fn e2e_partition_delete_removes_all_rows_for_partition() -> Result<()> {
                             consistency: 1,
                             default_fields: vec![],
                             facet_fields: vec![],
+                            boost_fields: vec![],
+                            group_by_partition: false,
                         })
                         .await
                         .context("searching for first partition row")?;
@@ -921,6 +940,8 @@ async fn e2e_partition_delete_removes_all_rows_for_partition() -> Result<()> {
                             consistency: 1,
                             default_fields: vec![],
                             facet_fields: vec![],
+                            boost_fields: vec![],
+                            group_by_partition: false,
                         })
                         .await
                         .context("searching for second partition row")?;
@@ -1036,6 +1057,8 @@ async fn e2e_checkpoint_not_advanced_on_partial_flush_failure() -> Result<()> {
                             consistency: 1,
                             default_fields: vec![],
                             facet_fields: vec![],
+                            boost_fields: vec![],
+                            group_by_partition: false,
                         })
                         .await
                         .context("polling gateway for target documents")?;
@@ -1131,6 +1154,8 @@ async fn e2e_fts_phrase_search() -> Result<()> {
                         consistency: 1,
                         default_fields: vec![],
                         facet_fields: vec![],
+                        boost_fields: vec![],
+                        group_by_partition: false,
                     })
                     .await
                     .context("phrase search")?;
@@ -1219,6 +1244,8 @@ async fn e2e_fts_fuzzy_search() -> Result<()> {
                         consistency: 1,
                         default_fields: vec![],
                         facet_fields: vec![],
+                        boost_fields: vec![],
+                        group_by_partition: false,
                     })
                     .await
                     .context("fuzzy search")?;
@@ -1311,6 +1338,8 @@ async fn e2e_fts_numeric_range() -> Result<()> {
                         consistency: 1,
                         default_fields: vec![],
                         facet_fields: vec![],
+                        boost_fields: vec![],
+                        group_by_partition: false,
                     })
                     .await
                     .context("numeric range search")?;
@@ -1390,6 +1419,8 @@ async fn e2e_fts_plain_keyword_with_default_fields() -> Result<()> {
                         consistency: 1,
                         default_fields: vec!["title".to_string(), "body".to_string()],
                         facet_fields: vec![],
+                        boost_fields: vec![],
+                        group_by_partition: false,
                     })
                     .await
                     .context("plain keyword search with default_fields")?;
@@ -1483,6 +1514,8 @@ async fn e2e_fts_keyword_and_numeric_filter() -> Result<()> {
                         consistency: 1,
                         default_fields: vec![],
                         facet_fields: vec![],
+                        boost_fields: vec![],
+                        group_by_partition: false,
                     })
                     .await
                     .context("keyword + numeric range search")?;
@@ -1587,6 +1620,8 @@ async fn e2e_fts_prefix_autocomplete() -> Result<()> {
                         consistency: 1,
                         default_fields: vec![],
                         facet_fields: vec![],
+                        boost_fields: vec![],
+                        group_by_partition: false,
                     })
                     .await
                     .context("broad prefix search (wire*)")?;
@@ -1606,6 +1641,8 @@ async fn e2e_fts_prefix_autocomplete() -> Result<()> {
                         consistency: 1,
                         default_fields: vec![],
                         facet_fields: vec![],
+                        boost_fields: vec![],
+                        group_by_partition: false,
                     })
                     .await
                     .context("narrow prefix search (wireless*)")?;
@@ -1728,6 +1765,8 @@ async fn e2e_fts_log_time_range_keyword() -> Result<()> {
                         consistency: 1,
                         default_fields: vec![],
                         facet_fields: vec![],
+                        boost_fields: vec![],
+                        group_by_partition: false,
                     })
                     .await
                     .context("log time-range + keyword search")?;
@@ -1845,6 +1884,8 @@ async fn e2e_fts_facets() -> Result<()> {
                             consistency: 1,
                             default_fields: vec![],
                             facet_fields: vec!["category".to_string()],
+                            boost_fields: vec![],
+                            group_by_partition: false,
                         })
                         .await
                         .context("facet search")?;
@@ -1885,6 +1926,289 @@ async fn e2e_fts_facets() -> Result<()> {
                     "facet aggregation did not converge: expected category buckets \
                      electronics=2 and books=1 after all documents were indexed"
                 );
+            }
+            .boxed()
+        })
+        .await
+}
+
+// =========================================================================
+// FTS — Boosted multi-field search
+// =========================================================================
+//
+// When `boost_fields` is provided, a bare keyword query is expanded into
+// per-field sub-queries with multiplicative BM25 boost weights. A document
+// that matches the query in a high-boost field (e.g. title^5) should rank
+// above one that matches only in a low-boost field (e.g. body^1), even when
+// both documents contain the keyword somewhere.
+//
+// Test design:
+//   Doc A — keyword "rocket" appears in `title`  (high-boost field)
+//   Doc B — keyword "rocket" appears in `body`   (low-boost field)
+//
+// With `boost_fields = [{title, 5.0}, {body, 1.0}]`, Doc A must rank first.
+//
+// Implementation: the node expands `rocket` into
+//   `(document.title:rocket^5 OR document.body:rocket^1)`
+// and passes it through Tantivy's QueryParser, which applies the BM25
+// boost natively.
+
+#[tokio::test]
+async fn e2e_fts_boosted_multifield() -> Result<()> {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("info")
+        .with_test_writer()
+        .try_init();
+
+    let schema = SchemaConfig::from_cql(
+        "CREATE TABLE IF NOT EXISTS {{keyspace}}.articles (\
+            doc_id text PRIMARY KEY,\
+            title text,\
+            body text\
+        ) WITH cdc = {'enabled': true};",
+    );
+
+    let cluster = TestCluster::builder()
+        .with_schema(schema)
+        .with_table_name("articles")
+        .enable_instrumentation(false)
+        .build()
+        .await
+        .context("building test cluster")?;
+
+    cluster
+        .scoped(|cluster| {
+            async move {
+                let gateway = cluster.gateway().context("building gateway client")?;
+
+                // Doc A: keyword "rocket" in title — the high-boost field.
+                // Doc B: keyword "rocket" in body only — the low-boost field.
+                let doc_a_id = format!("doc-{}", Uuid::new_v4());
+                let doc_b_id = format!("doc-{}", Uuid::new_v4());
+
+                let insert_a = format!(
+                    "INSERT INTO {}.{} (doc_id, title, body) \
+                     VALUES ('{}', 'Rocket Engine Design', 'general propulsion overview')",
+                    cluster.keyspace(),
+                    cluster.table_name(),
+                    doc_a_id,
+                );
+                let insert_b = format!(
+                    "INSERT INTO {}.{} (doc_id, title, body) \
+                     VALUES ('{}', 'General Propulsion Overview', 'rocket engine design details')",
+                    cluster.keyspace(),
+                    cluster.table_name(),
+                    doc_b_id,
+                );
+
+                cluster
+                    .session()
+                    .query_unpaged(insert_a, ())
+                    .await
+                    .context("inserting title-match doc (doc A)")?;
+                cluster
+                    .session()
+                    .query_unpaged(insert_b, ())
+                    .await
+                    .context("inserting body-match doc (doc B)")?;
+
+                // Wait for both documents to be indexed before asserting ranking.
+                gateway
+                    .search_until_hits(&["document.title:Rocket"], 30)
+                    .await
+                    .context("waiting for doc A to be indexed")?;
+                gateway
+                    .search_until_hits(&["document.title:Propulsion"], 30)
+                    .await
+                    .context("waiting for doc B to be indexed")?;
+
+                // Query with boost_fields so title matches outrank body matches.
+                // The bare query "rocket" expands to:
+                //   (document.title:rocket^5 OR document.body:rocket^1)
+                let resp = gateway
+                    .search(&SearchRequest {
+                        query: "rocket".to_string(),
+                        limit: 10,
+                        offset: 0,
+                        consistency: 1,
+                        default_fields: vec![],
+                        facet_fields: vec![],
+                        boost_fields: vec![
+                            BoostField {
+                                field: "title".to_string(),
+                                boost: 5.0,
+                            },
+                            BoostField {
+                                field: "body".to_string(),
+                                boost: 1.0,
+                            },
+                        ],
+                        group_by_partition: false,
+                    })
+                    .await
+                    .context("boosted multi-field search")?;
+
+                ensure!(
+                    resp.total_hits >= 2,
+                    "expected at least 2 hits for 'rocket', got {}",
+                    resp.total_hits
+                );
+
+                // Doc A (title match, boost 5) must outrank Doc B (body match, boost 1).
+                let first_id = resp.hits[0]["id"].as_str().unwrap_or("");
+                ensure!(
+                    first_id == doc_a_id.as_str(),
+                    "expected title-match doc (doc A) to rank first, but got id={} \
+                     — boost_fields may not be expanding correctly",
+                    first_id
+                );
+
+                Ok(())
+            }
+            .boxed()
+        })
+        .await
+}
+
+// =========================================================================
+// FTS — Nested / relational search via group_by_partition
+// =========================================================================
+//
+// ScyllaDB tables with compound primary keys (partition key + clustering
+// columns) store multiple rows per logical entity. When searching for
+// "users who have at least one Widget order", a naïve search returns one
+// hit per *row* (order), not one hit per *user* (partition). The
+// `group_by_partition` flag collapses those per-row hits down to one
+// representative hit per ScyllaDB partition — effectively a "GROUP BY
+// partition_key" on the result set.
+//
+// Test design:
+//   User A — orders 1 and 2, both titled "Widget Alpha"  (2 matching rows)
+//   User B — orders 1 and 2, both titled "Widget Beta"   (2 matching rows)
+//
+// Without grouping:  `total_hits >= 4`   (one hit per row)
+// With grouping:     `resp.hits.len() == 2`  (one hit per user)
+//
+// The ingestor routes all rows for the same partition to the same node
+// (hash(partition_key) % N_nodes), so no cross-node deduplication is
+// needed and the test is valid with a single search node.
+
+#[tokio::test]
+async fn e2e_fts_nested_relational_group_by_partition() -> Result<()> {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("info")
+        .with_test_writer()
+        .try_init();
+
+    let schema = SchemaConfig::from_cql(
+        "CREATE TABLE IF NOT EXISTS {{keyspace}}.orders (\
+            user_id text,\
+            order_id int,\
+            title text,\
+            PRIMARY KEY (user_id, order_id)\
+        ) WITH cdc = {'enabled': true};",
+    );
+
+    let cluster = TestCluster::builder()
+        .with_schema(schema)
+        .with_table_name("orders")
+        .enable_instrumentation(false)
+        .build()
+        .await
+        .context("building test cluster")?;
+
+    cluster
+        .scoped(|cluster| {
+            async move {
+                let gateway = cluster.gateway().context("building gateway client")?;
+
+                let user_a = format!("user-a-{}", Uuid::new_v4());
+                let user_b = format!("user-b-{}", Uuid::new_v4());
+
+                // Insert two Widget orders for each user (4 matching rows total).
+                for (user_id, order_id, title) in [
+                    (user_a.as_str(), 1, "Widget Alpha"),
+                    (user_a.as_str(), 2, "Widget Alpha"),
+                    (user_b.as_str(), 1, "Widget Beta"),
+                    (user_b.as_str(), 2, "Widget Beta"),
+                ] {
+                    let cql = format!(
+                        "INSERT INTO {}.{} (user_id, order_id, title) \
+                         VALUES ('{}', {}, '{}')",
+                        cluster.keyspace(),
+                        cluster.table_name(),
+                        user_id,
+                        order_id,
+                        title,
+                    );
+                    cluster
+                        .session()
+                        .query_unpaged(cql, ())
+                        .await
+                        .with_context(|| {
+                            format!("inserting order for {} order_id={}", user_id, order_id)
+                        })?;
+                }
+
+                // Wait for at least one Widget row to be indexed.
+                gateway
+                    .search_until_hits(&["document.title:Widget"], 30)
+                    .await
+                    .context("waiting for Widget orders to be indexed")?;
+
+                // Without grouping: expect raw document count >= 4.
+                // We poll because not all 4 rows may be committed yet.
+                let mut raw_hits = 0u64;
+                for _ in 0..40 {
+                    let resp = gateway
+                        .search(&SearchRequest {
+                            query: "document.title:Widget".to_string(),
+                            limit: 25,
+                            offset: 0,
+                            consistency: 1,
+                            default_fields: vec![],
+                            facet_fields: vec![],
+                            boost_fields: vec![],
+                            group_by_partition: false,
+                        })
+                        .await
+                        .context("raw (ungrouped) Widget search")?;
+
+                    if resp.total_hits >= 4 {
+                        raw_hits = resp.total_hits;
+                        break;
+                    }
+                    sleep(Duration::from_millis(500)).await;
+                }
+                ensure!(
+                    raw_hits >= 4,
+                    "expected >= 4 raw hits (one per Widget order row), got {}",
+                    raw_hits
+                );
+
+                // With grouping: expect exactly 2 hits (one per user partition).
+                let grouped_resp = gateway
+                    .search(&SearchRequest {
+                        query: "document.title:Widget".to_string(),
+                        limit: 25,
+                        offset: 0,
+                        consistency: 1,
+                        default_fields: vec![],
+                        facet_fields: vec![],
+                        boost_fields: vec![],
+                        group_by_partition: true,
+                    })
+                    .await
+                    .context("grouped (group_by_partition) Widget search")?;
+
+                ensure!(
+                    grouped_resp.hits.len() == 2,
+                    "expected exactly 2 grouped hits (one per user), got {} \
+                     — group_by_partition deduplication may not be working",
+                    grouped_resp.hits.len()
+                );
+
+                Ok(())
             }
             .boxed()
         })

@@ -1,4 +1,4 @@
-use crate::engine::core::{AdaptiveConfig, Engine};
+use crate::engine::core::{AdaptiveConfig, Engine, SearchParams};
 use anyhow::Result;
 use tantylla_common::{
     indexer::{
@@ -89,13 +89,15 @@ impl IndexService for IndexServiceService {
             offset
         );
 
-        match self.engine.search(
-            &req.query,
-            req.limit as usize,
-            req.offset as usize,
-            &req.default_fields,
-            &req.facet_fields,
-        ) {
+        match self.engine.search(SearchParams {
+            query_str: &req.query,
+            limit: req.limit as usize,
+            offset: req.offset as usize,
+            default_fields: &req.default_fields,
+            facet_fields: &req.facet_fields,
+            boost_fields: &req.boost_fields,
+            group_by_partition: req.group_by_partition,
+        }) {
             Ok(response) => {
                 tracing::debug!(
                     target: "test_event",

@@ -17,8 +17,8 @@ use tantivy::schema::{
 use tantivy::{Document, Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument, Term};
 use tantylla_common::indexer::index_operation::OpType;
 use tantylla_common::indexer::{
-    CollectionDelta, FacetBucket, FacetResult, IndexBatchResponse, IndexOperation, SearchHit,
-    SearchResponse,
+    BoostField, CollectionDelta, FacetBucket, FacetResult, IndexBatchResponse, IndexOperation,
+    SearchHit, SearchResponse,
 };
 use tantylla_common::tracing::events::{TestEvent, TestEventSource};
 use tracing::{debug, error, info, trace, warn};
@@ -50,6 +50,18 @@ struct Doc {
     expires_at: i64,
     writetime: u64,
     generation: u64,
+}
+
+/// Parameters for a single search request, grouped to keep the `search`
+/// method signature within Clippy's `too_many_arguments` lint limit (7).
+pub(crate) struct SearchParams<'a> {
+    pub query_str: &'a str,
+    pub limit: usize,
+    pub offset: usize,
+    pub default_fields: &'a [String],
+    pub facet_fields: &'a [String],
+    pub boost_fields: &'a [BoostField],
+    pub group_by_partition: bool,
 }
 
 #[derive(Clone)]
@@ -254,14 +266,16 @@ impl Engine {
         })
     }
 
-    pub(crate) fn search(
-        &self,
-        query_str: &str,
-        limit: usize,
-        offset: usize,
-        default_fields: &[String],
-        facet_fields: &[String],
-    ) -> Result<SearchResponse> {
+    pub(crate) fn search(&self, params: SearchParams<'_>) -> Result<SearchResponse> {
+        let SearchParams {
+            query_str,
+            limit,
+            offset,
+            default_fields,
+            facet_fields,
+            boost_fields,
+            group_by_partition,
+        } = params;
         debug!(
             target: "test_event",
             source = %TestEventSource::Node,
@@ -273,27 +287,35 @@ impl Engine {
         let start_micros = now_micros();
 
         // =========================================================================
-        // Default-field expansion
+        // Query expansion: boosted multi-field and default-field expansion
         // =========================================================================
         //
-        // When the caller provides `default_fields`, we expand a bare keyword
-        // query (one that contains no explicit `field:` prefix) into an OR over
-        // `document.<field>:<term>` sub-queries so that clients do not need to
-        // know the internal field layout.
+        // Priority order:
+        //   1. `boost_fields` — expand with per-field ^N boost weights so that
+        //      high-priority fields (e.g. title) outrank low-priority ones (body).
+        //   2. `default_fields` — expand without weights, plain OR across fields.
+        //   3. Legacy — use the raw query string unchanged.
         //
-        // When `default_fields` is empty we fall back to the legacy behavior of
-        // registering the top-level `document` JSON field as the sole default,
-        // which forces clients to use the explicit `document.foo:bar` syntax.
-        //
-        // Implementation note: we feed the expanded query string back into
-        // `QueryParser` so that all of Tantivy's query syntax (phrases, ranges,
-        // fuzzy, boolean operators) continues to work transparently. The
-        // expansion is applied only when the raw query string does not already
-        // contain a colon (`:`) — a reliable heuristic for "no explicit field
-        // prefix". Queries that mix bare terms and field-prefixed terms are not
-        // currently expanded; the caller is expected to use `default_fields`
-        // only for purely bare-keyword queries.
-        let effective_query = if !default_fields.is_empty() && !query_str.contains(':') {
+        // Expansion is applied only when the query string contains no colon (`:`),
+        // which reliably indicates "no explicit field prefix". Queries that already
+        // use Tantivy field syntax are passed through unmodified.
+        let effective_query = if !boost_fields.is_empty() && !query_str.contains(':') {
+            // Boosted expansion: each token becomes
+            //   `(document.f1:token^b1 OR document.f2:token^b2 OR ...)`
+            // and multi-token queries are AND-ed together.
+            let tokens: Vec<&str> = query_str.split_whitespace().collect();
+            let clauses: Vec<String> = tokens
+                .iter()
+                .map(|token| {
+                    let per_field: Vec<String> = boost_fields
+                        .iter()
+                        .map(|bf| format!("document.{}:{}^{}", bf.field, token, bf.boost))
+                        .collect();
+                    format!("({})", per_field.join(" OR "))
+                })
+                .collect();
+            clauses.join(" AND ")
+        } else if !default_fields.is_empty() && !query_str.contains(':') {
             // Build `(document.f1:TERM OR document.f2:TERM OR ...)` for every
             // whitespace-separated token in the query so that multi-word bare
             // queries (e.g., "wireless keyboard") are expanded correctly.
@@ -324,46 +346,120 @@ impl Engine {
             (Occur::Must, Box::new(expiration_query)),
         ]);
 
-        let top_docs = searcher.search(
-            &combined_query,
-            &TopDocs::with_limit(limit).and_offset(offset),
-        )?;
         let total_hits = searcher.search(&combined_query, &Count)?;
 
-        let mut hits = Vec::new();
-        for (score, doc_address) in top_docs {
-            let retrieved_doc: TantivyDocument = searcher.doc(doc_address)?;
+        // =========================================================================
+        // Hit collection: standard top-N or partition-grouped deduplication
+        // =========================================================================
+        //
+        // When `group_by_partition` is true we collect all matching docs (capped
+        // at 10 000 to bound memory), group by `partition_key`, keep the highest-
+        // scoring document per partition, sort the groups by score, and then apply
+        // limit/offset. This produces "one result per ScyllaDB partition" semantics
+        // which is useful for parent-child relational queries.
+        //
+        // Because the ingestor routes all rows of the same partition to the same
+        // node (`hash(partition_key) % N_nodes`), no cross-node deduplication is
+        // required — each node independently deduplicates its own shard.
+        //
+        // `total_hits` is intentionally left as the raw document count so callers
+        // can compare `hits.len()` vs `total_hits` to detect deduplication.
+        let hits: Vec<SearchHit> = if group_by_partition {
+            // Cap at 10 000 to prevent unbounded memory use on large shards.
+            // TODO: make the cap configurable via AdaptiveConfig.
+            let cap = total_hits.min(10_000);
+            let all_scored = searcher
+                .search(&combined_query, &TopDocs::with_limit(cap))
+                .context("collecting all docs for group_by_partition")?;
 
-            let id = retrieved_doc
-                .get_first(self.field_id)
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
+            // Group by partition_key, keeping only the highest-scoring doc.
+            // We iterate in score-descending order (Tantivy guarantees this),
+            // so the first occurrence per partition key is always the winner.
+            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+            let mut grouped: Vec<(f32, tantivy::DocAddress)> = Vec::new();
+            for (score, doc_address) in all_scored {
+                let retrieved_doc: TantivyDocument = searcher
+                    .doc(doc_address)
+                    .context("fetching doc for partition grouping")?;
+                let pk = retrieved_doc
+                    .get_first(self.field_partition_key)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if seen.insert(pk) {
+                    grouped.push((score, doc_address));
+                }
+            }
 
-            let doc_json_str = retrieved_doc.to_json(&self.schema);
-
-            let payload_json = serde_json::from_str::<serde_json::Value>(&doc_json_str)
-                .ok()
-                .and_then(|mut v| match v.get_mut("document") {
-                    Some(serde_json::Value::Array(arr)) => {
-                        if !arr.is_empty() {
-                            Some(std::mem::take(&mut arr[0]))
-                        } else {
-                            None
-                        }
-                    }
-                    Some(other) => Some(other.clone()),
-                    None => None,
+            // Apply pagination over the deduplicated, score-sorted list.
+            grouped
+                .into_iter()
+                .skip(offset)
+                .take(limit)
+                .map(|(score, doc_address)| {
+                    let retrieved_doc: TantivyDocument = searcher.doc(doc_address)?;
+                    let id = retrieved_doc
+                        .get_first(self.field_id)
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let doc_json_str = retrieved_doc.to_json(&self.schema);
+                    let payload_json = serde_json::from_str::<serde_json::Value>(&doc_json_str)
+                        .ok()
+                        .and_then(|mut v| match v.get_mut("document") {
+                            Some(serde_json::Value::Array(arr)) if !arr.is_empty() => {
+                                Some(std::mem::take(&mut arr[0]))
+                            }
+                            Some(other) => Some(other.clone()),
+                            None => None,
+                        })
+                        .and_then(|v| serde_json::to_string(&v).ok())
+                        .unwrap_or_else(|| "{}".to_string());
+                    Ok(SearchHit {
+                        id,
+                        score,
+                        payload_json,
+                    })
                 })
-                .and_then(|v| serde_json::to_string(&v).ok())
-                .unwrap_or_else(|| "{}".to_string());
+                .collect::<Result<Vec<_>>>()?
+        } else {
+            let top_docs = searcher.search(
+                &combined_query,
+                &TopDocs::with_limit(limit).and_offset(offset),
+            )?;
 
-            hits.push(SearchHit {
-                id,
-                score,
-                payload_json,
-            });
-        }
+            let mut hits = Vec::new();
+            for (score, doc_address) in top_docs {
+                let retrieved_doc: TantivyDocument = searcher.doc(doc_address)?;
+
+                let id = retrieved_doc
+                    .get_first(self.field_id)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+
+                let doc_json_str = retrieved_doc.to_json(&self.schema);
+
+                let payload_json = serde_json::from_str::<serde_json::Value>(&doc_json_str)
+                    .ok()
+                    .and_then(|mut v| match v.get_mut("document") {
+                        Some(serde_json::Value::Array(arr)) if !arr.is_empty() => {
+                            Some(std::mem::take(&mut arr[0]))
+                        }
+                        Some(other) => Some(other.clone()),
+                        None => None,
+                    })
+                    .and_then(|v| serde_json::to_string(&v).ok())
+                    .unwrap_or_else(|| "{}".to_string());
+
+                hits.push(SearchHit {
+                    id,
+                    score,
+                    payload_json,
+                });
+            }
+            hits
+        };
 
         let time_delta_micros = now_micros() - start_micros;
 
