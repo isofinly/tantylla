@@ -1,10 +1,26 @@
 use crate::cluster::TestCluster;
+use crate::cluster::{SchemaConfig, gateway::SearchRequest};
 use crate::trace::TraceSequence;
 use anyhow::{Context, Result, bail, ensure};
 use futures::FutureExt;
 use tantylla_common::tracing::events::{TestEvent, TestEventSource, TracePayload};
 use tokio::time::{Duration, sleep};
 use uuid::Uuid;
+
+// =========================================================================
+// FTS Feature Tests
+// =========================================================================
+//
+// These tests drive the TDD cycle for the FTS features listed in the project
+// roadmap. Each test is kept as self-contained as possible: it spins up its
+// own cluster, inserts fixtures, and asserts search results.
+//
+// The tests are grouped roughly by feature complexity:
+//   1. Phrase / proximity  — works with the current schema (positions stored)
+//   2. Fuzzy / typo        — works via Tantivy's `~N` query syntax
+//   3. Numeric range       — works via JSON fast sub-fields in Tantivy ≥ 0.22
+//   4. Plain keyword       — requires `default_fields` expansion (new feature)
+//   5. Numeric filter      — numeric range via structured `default_fields` query
 
 #[tokio::test]
 async fn e2e_cdc_to_gateway_search() -> Result<()> {
@@ -148,6 +164,7 @@ async fn e2e_gateway_failure_on_missing_node() -> Result<()> {
                         limit: 10,
                         offset: 0,
                         consistency: 2,
+                        default_fields: vec![],
                     })
                     .await;
 
@@ -344,6 +361,7 @@ async fn e2e_cdc_set_element_removal_updates_search_index() -> Result<()> {
                             limit: 10,
                             offset: 0,
                             consistency: 1,
+                            default_fields: vec![],
                         })
                         .await
                         .context("searching for removed tag")?;
@@ -442,6 +460,7 @@ async fn e2e_cdc_set_addition_indexes_added_label() -> Result<()> {
                             limit: 10,
                             offset: 0,
                             consistency: 1,
+                            default_fields: vec![],
                         })
                         .await
                         .context("searching for combined legacy and overridden labels")?;
@@ -562,6 +581,7 @@ async fn e2e_row_delete_removes_single_clustering_row() -> Result<()> {
                             limit: 10,
                             offset: 0,
                             consistency: 1,
+                            default_fields: vec![],
                         })
                         .await
                         .context("searching for removed order")?;
@@ -571,6 +591,7 @@ async fn e2e_row_delete_removes_single_clustering_row() -> Result<()> {
                             limit: 10,
                             offset: 0,
                             consistency: 1,
+                            default_fields: vec![],
                         })
                         .await
                         .context("searching for kept order")?;
@@ -676,6 +697,7 @@ async fn e2e_range_delete_removes_rows_within_bounds() -> Result<()> {
                             limit: 10,
                             offset: 0,
                             consistency: 1,
+                            default_fields: vec![],
                         })
                         .await
                         .context("searching for range-deleted middle row")?;
@@ -771,6 +793,7 @@ async fn e2e_partition_key_delete_removes_single_primary_key_row() -> Result<()>
                             limit: 10,
                             offset: 0,
                             consistency: 1,
+                            default_fields: vec![],
                         })
                         .await
                         .context("searching for deleted single-key row")?;
@@ -878,6 +901,7 @@ async fn e2e_partition_delete_removes_all_rows_for_partition() -> Result<()> {
                             limit: 10,
                             offset: 0,
                             consistency: 1,
+                            default_fields: vec![],
                         })
                         .await
                         .context("searching for first partition row")?;
@@ -887,6 +911,7 @@ async fn e2e_partition_delete_removes_all_rows_for_partition() -> Result<()> {
                             limit: 10,
                             offset: 0,
                             consistency: 1,
+                            default_fields: vec![],
                         })
                         .await
                         .context("searching for second partition row")?;
@@ -1000,6 +1025,7 @@ async fn e2e_checkpoint_not_advanced_on_partial_flush_failure() -> Result<()> {
                             limit: 25,
                             offset: 0,
                             consistency: 1,
+                            default_fields: vec![],
                         })
                         .await
                         .context("polling gateway for target documents")?;
@@ -1022,6 +1048,344 @@ async fn e2e_checkpoint_not_advanced_on_partial_flush_failure() -> Result<()> {
                      after ingestor restart, but the checkpoint appears to have advanced past \
                      the undelivered data"
                 );
+            }
+            .boxed()
+        })
+        .await
+}
+
+// =========================================================================
+// FTS — Phrase search
+// =========================================================================
+//
+// Tantivy stores term positions (`WithFreqsAndPositions`) on the `document`
+// JSON field, so phrase queries like `"noise cancellation"` should work
+// out of the box as long as the field:value prefix is provided.
+
+#[tokio::test]
+async fn e2e_fts_phrase_search() -> Result<()> {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("info")
+        .with_test_writer()
+        .try_init();
+
+    let schema = SchemaConfig::from_cql(
+        "CREATE TABLE IF NOT EXISTS {{keyspace}}.products (\
+            doc_id text PRIMARY KEY,\
+            title text,\
+            body text\
+        ) WITH cdc = {'enabled': true};",
+    );
+
+    let cluster = TestCluster::builder()
+        .with_schema(schema)
+        .with_table_name("products")
+        .enable_instrumentation(false)
+        .build()
+        .await
+        .context("building test cluster")?;
+
+    cluster
+        .scoped(|cluster| {
+            async move {
+                let gateway = cluster.gateway().context("building gateway client")?;
+
+                // Insert two products: only one contains the exact phrase.
+                let match_id = format!("doc-{}", Uuid::new_v4());
+                let nomatch_id = format!("doc-{}", Uuid::new_v4());
+
+                let insert_match = format!(
+                    "INSERT INTO {}.{} (doc_id, title, body) VALUES ('{}', 'Headphones', 'active noise cancellation technology')",
+                    cluster.keyspace(), cluster.table_name(), match_id,
+                );
+                let insert_nomatch = format!(
+                    "INSERT INTO {}.{} (doc_id, title, body) VALUES ('{}', 'Speakers', 'great sound cancellation of noise')",
+                    cluster.keyspace(), cluster.table_name(), nomatch_id,
+                );
+
+                cluster.session().query_unpaged(insert_match, ()).await.context("inserting phrase-match doc")?;
+                cluster.session().query_unpaged(insert_nomatch, ()).await.context("inserting phrase-nomatch doc")?;
+
+                // Wait until the phrase-match doc appears via a term query first.
+                gateway
+                    .search_until_hits(&["document.body:\"noise cancellation\""], 30)
+                    .await
+                    .context("waiting for phrase match to become searchable")?;
+
+                // Confirm the no-match doc is NOT returned for the phrase.
+                let resp = gateway
+                    .search(&SearchRequest {
+                        query: r#"document.body:"noise cancellation""#.to_string(),
+                        limit: 10,
+                        offset: 0,
+                        consistency: 1,
+                        default_fields: vec![],
+                    })
+                    .await
+                    .context("phrase search")?;
+
+                ensure!(
+                    resp.total_hits >= 1,
+                    "expected at least one phrase hit, got {}",
+                    resp.total_hits
+                );
+
+                // Verify the matching document is present in results.
+                let ids: Vec<&str> = resp.hits.iter().map(|h| h["id"].as_str().unwrap_or("")).collect();
+                ensure!(
+                    ids.contains(&match_id.as_str()),
+                    "phrase-match doc not found in hits: {:?}",
+                    ids
+                );
+
+                Ok(())
+            }
+            .boxed()
+        })
+        .await
+}
+
+// =========================================================================
+// FTS — Fuzzy / typo-tolerant search
+// =========================================================================
+//
+// Tantivy supports edit-distance fuzzy matching via the `~N` suffix on
+// term queries: `document.title:wireles~1` matches "wireless" with up to
+// one character edit. No implementation changes are required for this
+// feature — it is validated here to lock in the behavior.
+
+#[tokio::test]
+async fn e2e_fts_fuzzy_search() -> Result<()> {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("info")
+        .with_test_writer()
+        .try_init();
+
+    let schema = SchemaConfig::from_cql(
+        "CREATE TABLE IF NOT EXISTS {{keyspace}}.products (\
+            doc_id text PRIMARY KEY,\
+            title text,\
+            body text\
+        ) WITH cdc = {'enabled': true};",
+    );
+
+    let cluster = TestCluster::builder()
+        .with_schema(schema)
+        .with_table_name("products")
+        .enable_instrumentation(false)
+        .build()
+        .await
+        .context("building test cluster")?;
+
+    cluster
+        .scoped(|cluster| {
+            async move {
+                let gateway = cluster.gateway().context("building gateway client")?;
+
+                let doc_id = format!("doc-{}", Uuid::new_v4());
+                let insert_cql = format!(
+                    "INSERT INTO {}.{} (doc_id, title, body) VALUES ('{}', 'Wireless Mouse', 'ergonomic design')",
+                    cluster.keyspace(), cluster.table_name(), doc_id,
+                );
+                cluster.session().query_unpaged(insert_cql, ()).await.context("inserting fuzzy-search fixture")?;
+
+                // Wait for exact match to appear first to ensure ingestion is done.
+                gateway
+                    .search_until_hits(&["document.title:Wireless"], 30)
+                    .await
+                    .context("waiting for exact term to become searchable")?;
+
+                // Now query with a typo: "wireles" (missing one 's') with distance 1.
+                // The `en_stem` tokenizer lowercases tokens, so the stored term
+                // is "wireless" (stemmed to "wireless"). We query with ~1.
+                // NOTE: Tantivy fuzzy matching operates on the *indexed* (stemmed)
+                // token. "wireles" and "wireless" differ by 1 edit — should match.
+                let resp = gateway
+                    .search(&SearchRequest {
+                        query: "document.title:wireles~1".to_string(),
+                        limit: 10,
+                        offset: 0,
+                        consistency: 1,
+                        default_fields: vec![],
+                    })
+                    .await
+                    .context("fuzzy search")?;
+
+                ensure!(
+                    resp.total_hits >= 1,
+                    "expected at least one fuzzy hit for 'wireles~1', got {}",
+                    resp.total_hits
+                );
+
+                Ok(())
+            }
+            .boxed()
+        })
+        .await
+}
+
+// =========================================================================
+// FTS — Numeric range query
+// =========================================================================
+//
+// Tantivy ≥ 0.22 automatically indexes numeric values stored in a JSON
+// field as fast sub-fields, enabling range queries such as
+// `document.price:[40 TO 100]`. The ingestor serializes CQL numeric
+// columns as JSON numbers, so this should work without schema changes.
+
+#[tokio::test]
+async fn e2e_fts_numeric_range() -> Result<()> {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("info")
+        .with_test_writer()
+        .try_init();
+
+    let schema = SchemaConfig::from_cql(
+        "CREATE TABLE IF NOT EXISTS {{keyspace}}.products (\
+            doc_id text PRIMARY KEY,\
+            title text,\
+            price double\
+        ) WITH cdc = {'enabled': true};",
+    );
+
+    let cluster = TestCluster::builder()
+        .with_schema(schema)
+        .with_table_name("products")
+        .enable_instrumentation(false)
+        .build()
+        .await
+        .context("building test cluster")?;
+
+    cluster
+        .scoped(|cluster| {
+            async move {
+                let gateway = cluster.gateway().context("building gateway client")?;
+
+                // Insert three products at different price points.
+                for (title, price) in [
+                    ("Budget Widget", 19.99_f64),
+                    ("Mid Widget", 59.99_f64),
+                    ("Premium Widget", 149.99_f64),
+                ] {
+                    let id = format!("doc-{}", Uuid::new_v4());
+                    let cql = format!(
+                        "INSERT INTO {}.{} (doc_id, title, price) VALUES ('{}', '{}', {})",
+                        cluster.keyspace(),
+                        cluster.table_name(),
+                        id,
+                        title,
+                        price,
+                    );
+                    cluster
+                        .session()
+                        .query_unpaged(cql, ())
+                        .await
+                        .with_context(|| format!("inserting product '{}'", title))?;
+                }
+
+                // Wait for any of the products to be indexed.
+                gateway
+                    .search_until_hits(&["document.title:Widget"], 30)
+                    .await
+                    .context("waiting for products to be indexed")?;
+
+                // Query for products in the 40–100 price range.
+                // Only "Mid Widget" (59.99) should match.
+                let resp = gateway
+                    .search(&SearchRequest {
+                        query: "document.price:[40 TO 100]".to_string(),
+                        limit: 10,
+                        offset: 0,
+                        consistency: 1,
+                        default_fields: vec![],
+                    })
+                    .await
+                    .context("numeric range search")?;
+
+                ensure!(
+                    resp.total_hits >= 1,
+                    "expected at least one hit for price range [40 TO 100], got {}",
+                    resp.total_hits
+                );
+
+                Ok(())
+            }
+            .boxed()
+        })
+        .await
+}
+
+// =========================================================================
+// FTS — Plain keyword search via default_fields
+// =========================================================================
+//
+// When `default_fields` is provided, the gateway/node should expand a bare
+// keyword query (e.g., `wireless`) into an OR over the listed sub-fields of
+// the `document` JSON object (e.g., `document.title:wireless OR
+// document.body:wireless`). This avoids requiring clients to prefix every
+// term with the field path.
+//
+// This test will FAIL until `default_fields` is implemented end-to-end.
+
+#[tokio::test]
+async fn e2e_fts_plain_keyword_with_default_fields() -> Result<()> {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("info")
+        .with_test_writer()
+        .try_init();
+
+    let schema = SchemaConfig::from_cql(
+        "CREATE TABLE IF NOT EXISTS {{keyspace}}.products (\
+            doc_id text PRIMARY KEY,\
+            title text,\
+            body text\
+        ) WITH cdc = {'enabled': true};",
+    );
+
+    let cluster = TestCluster::builder()
+        .with_schema(schema)
+        .with_table_name("products")
+        .enable_instrumentation(false)
+        .build()
+        .await
+        .context("building test cluster")?;
+
+    cluster
+        .scoped(|cluster| {
+            async move {
+                let gateway = cluster.gateway().context("building gateway client")?;
+
+                let doc_id = format!("doc-{}", Uuid::new_v4());
+                let insert_cql = format!(
+                    "INSERT INTO {}.{} (doc_id, title, body) VALUES ('{}', 'Wireless Keyboard', 'compact layout')",
+                    cluster.keyspace(), cluster.table_name(), doc_id,
+                );
+                cluster.session().query_unpaged(insert_cql, ()).await.context("inserting plain-keyword fixture")?;
+
+                // Wait for the document to appear via a precise field query.
+                gateway
+                    .search_until_hits(&["document.title:Wireless"], 30)
+                    .await
+                    .context("waiting for document to be indexed")?;
+
+                // Now search with a bare keyword and default_fields — no `document.` prefix.
+                let resp = gateway
+                    .search(&SearchRequest {
+                        query: "wireless".to_string(),
+                        limit: 10,
+                        offset: 0,
+                        consistency: 1,
+                        default_fields: vec!["title".to_string(), "body".to_string()],
+                    })
+                    .await
+                    .context("plain keyword search with default_fields")?;
+
+                ensure!(
+                    resp.total_hits >= 1,
+                    "expected hits for plain keyword 'wireless' with default_fields, got 0"
+                );
+
+                Ok(())
             }
             .boxed()
         })

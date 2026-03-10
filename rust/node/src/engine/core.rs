@@ -257,6 +257,7 @@ impl Engine {
         query_str: &str,
         limit: usize,
         offset: usize,
+        default_fields: &[String],
     ) -> Result<SearchResponse> {
         debug!(
             target: "test_event",
@@ -268,8 +269,49 @@ impl Engine {
 
         let start_micros = now_micros();
 
+        // =========================================================================
+        // Default-field expansion
+        // =========================================================================
+        //
+        // When the caller provides `default_fields`, we expand a bare keyword
+        // query (one that contains no explicit `field:` prefix) into an OR over
+        // `document.<field>:<term>` sub-queries so that clients do not need to
+        // know the internal field layout.
+        //
+        // When `default_fields` is empty we fall back to the legacy behavior of
+        // registering the top-level `document` JSON field as the sole default,
+        // which forces clients to use the explicit `document.foo:bar` syntax.
+        //
+        // Implementation note: we feed the expanded query string back into
+        // `QueryParser` so that all of Tantivy's query syntax (phrases, ranges,
+        // fuzzy, boolean operators) continues to work transparently. The
+        // expansion is applied only when the raw query string does not already
+        // contain a colon (`:`) — a reliable heuristic for "no explicit field
+        // prefix". Queries that mix bare terms and field-prefixed terms are not
+        // currently expanded; the caller is expected to use `default_fields`
+        // only for purely bare-keyword queries.
+        let effective_query = if !default_fields.is_empty() && !query_str.contains(':') {
+            // Build `(document.f1:TERM OR document.f2:TERM OR ...)` for every
+            // whitespace-separated token in the query so that multi-word bare
+            // queries (e.g., "wireless keyboard") are expanded correctly.
+            let tokens: Vec<&str> = query_str.split_whitespace().collect();
+            let clauses: Vec<String> = tokens
+                .iter()
+                .map(|token| {
+                    let per_field: Vec<String> = default_fields
+                        .iter()
+                        .map(|field| format!("document.{}:{}", field, token))
+                        .collect();
+                    format!("({})", per_field.join(" OR "))
+                })
+                .collect();
+            clauses.join(" AND ")
+        } else {
+            query_str.to_owned()
+        };
+
         let query_parser = QueryParser::for_index(&self.index, vec![self.field_doc]);
-        let query = query_parser.parse_query(query_str)?;
+        let query = query_parser.parse_query(&effective_query)?;
 
         let now_term = Term::from_field_i64(self.field_expires_at, start_micros);
 

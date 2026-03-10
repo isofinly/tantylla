@@ -11,6 +11,12 @@ pub struct SearchRequest {
     pub limit: usize,
     pub offset: usize,
     pub consistency: i32,
+    /// Sub-field names (without the `document.` prefix) to use as default
+    /// search fields when the query does not contain an explicit field prefix.
+    /// Maps to the `default_fields` field in the proto `SearchRequest`.
+    /// An empty vec disables the feature (legacy behaviour).
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub default_fields: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -66,6 +72,7 @@ impl GatewayClient {
                     limit: 10,
                     offset: 0,
                     consistency: 1,
+                    default_fields: vec![],
                 };
 
                 match self.search(&req).await {

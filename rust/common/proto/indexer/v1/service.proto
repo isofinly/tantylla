@@ -165,6 +165,17 @@ message SearchRequest {
     CONSISTENCY_ALL = 2;
   }
   Consistency consistency = 4;
+
+  // Optional list of document sub-field names (without the "document." prefix)
+  // to use as default search fields when the query string does not contain an
+  // explicit field prefix.
+  //
+  // When non-empty, a bare query such as `wireless` is expanded by the node
+  // into `(document.<f1>:wireless OR document.<f2>:wireless OR ...)` before
+  // being handed to Tantivy's QueryParser. When empty, the node falls back to
+  // the legacy behaviour of using the entire `document` JSON field as the
+  // sole default field.
+  repeated string default_fields = 5;
 }
 
 message SearchResponse {

@@ -89,10 +89,12 @@ impl IndexService for IndexServiceService {
             offset
         );
 
-        match self
-            .engine
-            .search(&req.query, req.limit as usize, req.offset as usize)
-        {
+        match self.engine.search(
+            &req.query,
+            req.limit as usize,
+            req.offset as usize,
+            &req.default_fields,
+        ) {
             Ok(response) => {
                 tracing::debug!(
                     target: "test_event",
