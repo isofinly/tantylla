@@ -210,6 +210,18 @@ async fn e2e_cdc_set_overwrite_indexes_new_label() -> Result<()> {
     cluster
         .scoped(|cluster| {
             async move {
+                let trace_collector = cluster
+                    .trace_collector()
+                    .context("fetching trace collector")?;
+                let startup_sequence = TraceSequence::new()
+                    .event_from_source(TestEventSource::Node, TestEvent::Startup)
+                    .event_from_source(TestEventSource::Gateway, TestEvent::Startup)
+                    .event_from_source(TestEventSource::Ingestor, TestEvent::Startup);
+                trace_collector
+                    .wait_for_sequence(&startup_sequence, 20)
+                    .await
+                    .context("waiting for startup sequence")?;
+
                 let doc_id = format!("doc-{}", Uuid::new_v4());
 
                 let insert_cql = format!(
@@ -281,6 +293,18 @@ async fn e2e_cdc_set_element_removal_updates_search_index() -> Result<()> {
     cluster
         .scoped(|cluster| {
             async move {
+                let trace_collector = cluster
+                    .trace_collector()
+                    .context("fetching trace collector")?;
+                let startup_sequence = TraceSequence::new()
+                    .event_from_source(TestEventSource::Node, TestEvent::Startup)
+                    .event_from_source(TestEventSource::Gateway, TestEvent::Startup)
+                    .event_from_source(TestEventSource::Ingestor, TestEvent::Startup);
+                trace_collector
+                    .wait_for_sequence(&startup_sequence, 20)
+                    .await
+                    .context("waiting for startup sequence")?;
+
                 let doc_id = format!("doc-{}", Uuid::new_v4());
 
                 let insert_cql = format!(
@@ -367,6 +391,18 @@ async fn e2e_cdc_set_addition_indexes_added_label() -> Result<()> {
     cluster
         .scoped(|cluster| {
             async move {
+                let trace_collector = cluster
+                    .trace_collector()
+                    .context("fetching trace collector")?;
+                let startup_sequence = TraceSequence::new()
+                    .event_from_source(TestEventSource::Node, TestEvent::Startup)
+                    .event_from_source(TestEventSource::Gateway, TestEvent::Startup)
+                    .event_from_source(TestEventSource::Ingestor, TestEvent::Startup);
+                trace_collector
+                    .wait_for_sequence(&startup_sequence, 20)
+                    .await
+                    .context("waiting for startup sequence")?;
+
                 let doc_id = format!("doc-{}", Uuid::new_v4());
 
                 let insert_cql = format!(
@@ -454,6 +490,18 @@ async fn e2e_row_delete_removes_single_clustering_row() -> Result<()> {
     cluster
         .scoped(|cluster| {
             async move {
+                let trace_collector = cluster
+                    .trace_collector()
+                    .context("fetching trace collector")?;
+                let startup_sequence = TraceSequence::new()
+                    .event_from_source(TestEventSource::Node, TestEvent::Startup)
+                    .event_from_source(TestEventSource::Gateway, TestEvent::Startup)
+                    .event_from_source(TestEventSource::Ingestor, TestEvent::Startup);
+                trace_collector
+                    .wait_for_sequence(&startup_sequence, 20)
+                    .await
+                    .context("waiting for startup sequence")?;
+
                 let user_id = format!("user-{}", Uuid::new_v4());
 
                 let insert_keep = format!(
@@ -481,10 +529,19 @@ async fn e2e_row_delete_removes_single_clustering_row() -> Result<()> {
                     .context("inserting delete row")?;
 
                 let gateway = cluster.gateway().context("building gateway client")?;
+                // Wait for both rows to be committed before issuing the delete.
+                // Without this, the condition `removed==0 AND kept>0` can race:
+                // the delete CDC event may be processed and committed before the
+                // separate insert CDC event for the "keep" row is committed,
+                // causing `kept.total_hits==0` even though no bug occurred.
                 gateway
                     .search_until_hits(&["document.title:issue_005_delete"], 20)
                     .await
                     .context("waiting for delete candidate to become searchable")?;
+                gateway
+                    .search_until_hits(&["document.title:issue_005_keep"], 20)
+                    .await
+                    .context("waiting for keep row to become searchable")?;
 
                 let delete_cql = format!(
                     "DELETE FROM {}.{} WHERE user_id = '{}' AND order_id = 2",
@@ -560,6 +617,18 @@ async fn e2e_range_delete_removes_rows_within_bounds() -> Result<()> {
     cluster
         .scoped(|cluster| {
             async move {
+                let trace_collector = cluster
+                    .trace_collector()
+                    .context("fetching trace collector")?;
+                let startup_sequence = TraceSequence::new()
+                    .event_from_source(TestEventSource::Node, TestEvent::Startup)
+                    .event_from_source(TestEventSource::Gateway, TestEvent::Startup)
+                    .event_from_source(TestEventSource::Ingestor, TestEvent::Startup);
+                trace_collector
+                    .wait_for_sequence(&startup_sequence, 20)
+                    .await
+                    .context("waiting for startup sequence")?;
+
                 let user_id = format!("user-{}", Uuid::new_v4());
 
                 for (order_id, title) in [
@@ -651,6 +720,18 @@ async fn e2e_partition_key_delete_removes_single_primary_key_row() -> Result<()>
     cluster
         .scoped(|cluster| {
             async move {
+                let trace_collector = cluster
+                    .trace_collector()
+                    .context("fetching trace collector")?;
+                let startup_sequence = TraceSequence::new()
+                    .event_from_source(TestEventSource::Node, TestEvent::Startup)
+                    .event_from_source(TestEventSource::Gateway, TestEvent::Startup)
+                    .event_from_source(TestEventSource::Ingestor, TestEvent::Startup);
+                trace_collector
+                    .wait_for_sequence(&startup_sequence, 20)
+                    .await
+                    .context("waiting for startup sequence")?;
+
                 let doc_id = format!("doc-{}", Uuid::new_v4());
 
                 let insert_cql = format!(
@@ -736,6 +817,18 @@ async fn e2e_partition_delete_removes_all_rows_for_partition() -> Result<()> {
     cluster
         .scoped(|cluster| {
             async move {
+                let trace_collector = cluster
+                    .trace_collector()
+                    .context("fetching trace collector")?;
+                let startup_sequence = TraceSequence::new()
+                    .event_from_source(TestEventSource::Node, TestEvent::Startup)
+                    .event_from_source(TestEventSource::Gateway, TestEvent::Startup)
+                    .event_from_source(TestEventSource::Ingestor, TestEvent::Startup);
+                trace_collector
+                    .wait_for_sequence(&startup_sequence, 20)
+                    .await
+                    .context("waiting for startup sequence")?;
+
                 let user_id = format!("user-{}", Uuid::new_v4());
 
                 for (order_id, title) in
@@ -760,7 +853,11 @@ async fn e2e_partition_delete_removes_all_rows_for_partition() -> Result<()> {
                 gateway
                     .search_until_hits(&["document.title:issue_006_partition_a"], 20)
                     .await
-                    .context("waiting for partition fixture rows to become searchable")?;
+                    .context("waiting for first partition row to become searchable")?;
+                gateway
+                    .search_until_hits(&["document.title:issue_006_partition_b"], 20)
+                    .await
+                    .context("waiting for second partition row to become searchable")?;
 
                 let partition_delete_cql = format!(
                     "DELETE FROM {}.{} WHERE user_id = '{}'",

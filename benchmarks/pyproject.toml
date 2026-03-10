@@ -1,0 +1,23 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "bencher"
+version = "0.1.0"
+description = "FTS benchmark framework: Tantylla vs Elasticsearch"
+requires-python = ">=3.11"
+dependencies = [
+    "cassandra-driver>=3.29.0",
+    "docker>=7.0.0",
+    "requests>=2.31.0",
+]
+
+[project.scripts]
+bench = "bencher.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["bencher"]
+
+[tool.uv]
+dev-dependencies = []

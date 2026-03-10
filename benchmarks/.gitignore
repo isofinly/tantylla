@@ -1,0 +1,18 @@
+# Terraform / OpenTofu
+.terraform/
+*.tfstate
+*.tfstate.backup
+*.tfstate.*.backup
+
+# Keep the lock file for reproducible provider versions.
+!.terraform.lock.hcl
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+
+# Docker build artifacts
+*.tar

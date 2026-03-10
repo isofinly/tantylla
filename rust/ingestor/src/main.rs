@@ -1,11 +1,7 @@
 use anyhow::Context;
 use clap::Parser;
 use scylla::client::session_builder::SessionBuilder;
-use std::{
-    net::SocketAddr,
-    sync::{Arc, OnceLock},
-    time::{Duration, SystemTime},
-};
+use std::sync::{Arc, OnceLock};
 use tantylla_common::{WorkerGuard, tracing::layer::TestEventLayer};
 use tantylla_common::{
     logger,
@@ -14,11 +10,10 @@ use tantylla_common::{
 use tokio::time;
 use tracing::{error, info};
 
-use crate::{batch::service::Service, checkpointer::core::Checkpointer};
+use crate::batch::service::Service;
 
 mod batch;
 mod cdc;
-mod checkpointer;
 mod router;
 
 #[derive(Parser, Debug)]
@@ -86,19 +81,39 @@ struct Args {
     #[cfg(debug_assertions)]
     #[arg(long, help = "UDP port for debug test events")]
     test_event_port: Option<u16>,
+
+    #[cfg(debug_assertions)]
+    #[arg(
+        long,
+        help = "Override CDC start timestamp (microseconds since Unix epoch)"
+    )]
+    start_timestamp_micros: Option<i64>,
 }
 
-pub(crate) struct AccessPair {
-    pub(crate) keyspace: String,
-    pub(crate) table: String,
-}
-
-static GLOBAL_CONFIG: OnceLock<AccessPair> = OnceLock::new();
 static LOGGER_GUARD: OnceLock<WorkerGuard> = OnceLock::new();
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+
+    #[cfg(debug_assertions)]
+    let start_timestamp = if let Some(micros) = args.start_timestamp_micros {
+        chrono::Duration::microseconds(micros)
+    } else {
+        chrono::Duration::from_std(
+            std::time::SystemTime::now()
+                .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                .expect("system time is after Unix epoch"),
+        )
+        .expect("system time fits in chrono::Duration")
+    };
+    #[cfg(not(debug_assertions))]
+    let start_timestamp = chrono::Duration::from_std(
+        std::time::SystemTime::now()
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .expect("system time is after Unix epoch"),
+    )
+    .expect("system time fits in chrono::Duration");
 
     #[cfg(debug_assertions)]
     let test_event_port = args.test_event_port;
@@ -128,22 +143,14 @@ async fn main() -> anyhow::Result<()> {
     }
 
     info!("Connecting to ScyllaDB at {:?}...", &args.scylla_uri);
-    let scylla_uris: Vec<SocketAddr> = args
-        .scylla_uri
-        .into_iter()
-        .map(|s| {
-            s.parse::<SocketAddr>()
-                .expect("Failed to parse ScyllaDB URIs")
-        })
-        .collect();
 
     let session = SessionBuilder::new()
-        .known_nodes_addr(&scylla_uris)
+        .known_nodes(&args.scylla_uri)
         .build()
         .await?;
     let session = Arc::new(session);
 
-    info!("Connected to ScyllaDB at {:?}", &scylla_uris);
+    info!("Connected to ScyllaDB at {:?}", &args.scylla_uri);
 
     let mut node_info = ahash::AHashMap::new();
     let mut nodes = args.search_nodes.clone();
@@ -161,54 +168,30 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    tracing::debug!(
-        target: "test_event",
-        source = %TestEventSource::Ingestor,
-        event = %TestEvent::Startup,
-        table = format!("{}.{}", keyspace, table)
-    );
-
-    if GLOBAL_CONFIG
-        .set(AccessPair {
-            keyspace: keyspace.to_string(),
-            table: table.to_string(),
-        })
-        .is_err()
-    {
-        return Err(anyhow::anyhow!("Failed to set global configuration"));
-    }
-
     let batch_service = Arc::new(Service::new(format!("{}.{}", keyspace, table)));
 
-    let router = Arc::new(
-        router::core::Router::new(
-            node_info,
-            &keyspace,
-            &table,
-            session.clone(),
-            batch_service.clone(),
-        )
-        .await?,
-    );
+    let router = router::core::Router::new(
+        node_info,
+        &keyspace,
+        &table,
+        session.clone(),
+        batch_service.clone(),
+    )
+    .await?;
     let factory = Arc::new(cdc::consumer::ConsumerFactory::new(router));
 
     // TODO: Handle 2026-01-20 17:25:34.874  WARN scylla::cluster::metadata: /Users/isofinly/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/scylla-1.4.1/src/cluster/metadata.rs:641: Failed to fetch metadata using current control connection control_connection_address=127.0.0.1:9043 error=Control connection pool error: The pool is broken; Last connection failed with: Connection refused (os error 61)
     // TODO: Update builder params for persistent CDC consumption
     // TODO: Create unique builder for each keyspace and table instead of a single instance
-
-    let last_checkpoint_offset = match Checkpointer::get_last_read_offset()? {
-        Some(offset) => offset,
-        None => {
-            let mut offset = SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .context("reading system time")?;
-            // In test mode, start slightly earlier to avoid missing early writes.
-            if test_event_port.is_some() {
-                offset = offset.saturating_sub(Duration::from_secs(2));
-            }
-            offset
-        }
-    };
+    let cp_saver = Arc::new(
+        scylla_cdc::checkpoints::TableBackedCheckpointSaver::new_with_default_ttl(
+            session.clone(),
+            &keyspace,
+            &format!("{}_tantylla_checkpoints", table),
+        )
+        .await
+        .context("creating CDC checkpoint saver")?,
+    );
 
     let (mut reader, handle) = scylla_cdc::log_reader::CDCLogReaderBuilder::new()
         .session(session.clone())
@@ -217,12 +200,19 @@ async fn main() -> anyhow::Result<()> {
         .consumer_factory(factory)
         .safety_interval(time::Duration::from_millis(args.safety_interval))
         .sleep_interval(time::Duration::from_millis(args.sleep_interval))
-        .start_timestamp(
-            chrono::Duration::from_std(last_checkpoint_offset)
-                .context("converting checkpoint offset")?,
-        )
+        .should_save_progress(true)
+        .should_load_progress(true)
+        .checkpoint_saver(cp_saver)
+        .start_timestamp(start_timestamp)
         .build()
         .await?;
+
+    tracing::debug!(
+        target: "test_event",
+        source = %TestEventSource::Ingestor,
+        event = %TestEvent::Startup,
+        table = format!("{}.{}", keyspace, table)
+    );
 
     info!("Starting CDC Log Reader for {}.{}", keyspace, table);
     tokio::select! {

@@ -1,6 +1,5 @@
 use std::sync::{Arc, Mutex};
 
-use crate::checkpointer::core::Checkpointer;
 use ahash::AHashMap;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
@@ -287,14 +286,6 @@ impl Service {
                 failed_nodes,
                 message: format!("Failed to flush batches to {} nodes", failed_count),
             });
-        }
-
-        if let Some(&global_max_writetime) = node_max_writetimes.iter().max() {
-            let writetime_micro = std::time::Duration::from_micros(global_max_writetime);
-            match Checkpointer::commit_last_read_offset(writetime_micro) {
-                Ok(_) => info!("Checkpoint advanced to writetime {}", global_max_writetime),
-                Err(e) => error!("Error committing checkpoint after flush: {}", e),
-            }
         }
 
         tracing::debug!(

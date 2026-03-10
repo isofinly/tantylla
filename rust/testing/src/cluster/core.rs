@@ -7,17 +7,15 @@ use crate::cluster::services::{
     spawn_gateways, spawn_ingestors, spawn_search_nodes, spawn_single_ingestor,
     spawn_single_search_node,
 };
-use crate::cluster::utils::{
-    parse_checkpoint, remove_dir_if_exists, remove_file_if_exists, wait_for_tcp,
-};
+use crate::cluster::utils::{remove_dir_if_exists, wait_for_tcp};
 use crate::process::{ServiceProcess, workspace_root};
 use crate::trace::TraceCollector;
 use anyhow::Context;
 use futures::FutureExt;
 use futures::future::BoxFuture;
 use scylla::client::session::Session;
+use scylla::value::CqlTimestamp;
 use std::net::SocketAddr;
-use std::{fs, io::ErrorKind, path::PathBuf};
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, Instant, sleep};
 use uuid::Uuid;
@@ -284,8 +282,6 @@ impl TestCluster {
             .await
             .context("dropping keyspace")?;
 
-        self.cleanup_checkpoints()
-            .context("cleaning checkpoint files")?;
         self.cleanup_indexes()
             .context("cleaning index directories")?;
 
@@ -381,6 +377,7 @@ impl TestCluster {
             &self.table_name,
             &self.node_addrs,
             &self.instrumentation,
+            Some(0i64),
         )
         .await
         .context("spawning replacement ingestor")?;
@@ -393,56 +390,49 @@ impl TestCluster {
         &self,
         timeout_secs_max: u64,
     ) -> anyhow::Result<std::time::Duration> {
-        let checkpoint_path = self.checkpoint_path()?;
+        let checkpoint_table =
+            format!("{}.{}_tantylla_checkpoints", self.keyspace, self.table_name);
+
+        let query = format!("SELECT stream_id, time FROM {checkpoint_table}");
+
         let deadline = Instant::now() + Duration::from_secs(timeout_secs_max);
         loop {
-            match fs::read_to_string(&checkpoint_path) {
-                Ok(contents) => {
-                    let checkpoint = parse_checkpoint(&contents)?;
-                    return Ok(checkpoint);
+            let query_result = self
+                .session
+                .query_unpaged(query.as_str(), ())
+                .await
+                .context("querying checkpoint table")?;
+            let rows_result = query_result
+                .into_rows_result()
+                .context("reading checkpoint rows")?;
+            let rows = rows_result
+                .rows::<(Vec<u8>, Option<CqlTimestamp>)>()
+                .context("deserialising checkpoint rows")?;
+
+            for row in rows {
+                let (stream_id, time_opt) = row.context("reading checkpoint row")?;
+                // Skip the generation sentinel (stream_id = [0x00]).
+                if stream_id == [0u8] {
+                    continue;
                 }
-                Err(err) => {
-                    if err.kind() != ErrorKind::NotFound {
-                        return Err(anyhow::anyhow!(
-                            "Failed to read checkpoint file {:?}: {}",
-                            checkpoint_path,
-                            err
-                        ));
+                if let Some(CqlTimestamp(millis)) = time_opt {
+                    // i64::MAX is written as a dummy value for the generation
+                    // sentinel; skip it if it somehow appears on a real row.
+                    if millis >= 0 && millis != i64::MAX {
+                        return Ok(std::time::Duration::from_millis(millis as u64));
                     }
                 }
             }
 
             if Instant::now() > deadline {
                 anyhow::bail!(
-                    "Timed out waiting for checkpoint file {:?}",
-                    checkpoint_path
+                    "Timed out waiting for a checkpoint in {checkpoint_table} \
+                     after {timeout_secs_max}s"
                 );
             }
 
             sleep(Duration::from_millis(100)).await;
         }
-    }
-
-    fn checkpoint_path(&self) -> anyhow::Result<PathBuf> {
-        let root = workspace_root().context("finding workspace root")?;
-        Ok(root.join(format!("{}-{}.checkpoint", self.keyspace, self.table_name)))
-    }
-
-    fn cleanup_checkpoints(&self) -> anyhow::Result<()> {
-        let checkpoint_path = self.checkpoint_path()?;
-        let temp_path = checkpoint_path.with_file_name(format!(
-            ".tmp.{}",
-            checkpoint_path
-                .file_name()
-                .context("reading checkpoint file name")?
-                .to_string_lossy()
-        ));
-
-        remove_file_if_exists(&checkpoint_path)
-            .with_context(|| format!("removing checkpoint file {:?}", checkpoint_path))?;
-        remove_file_if_exists(&temp_path)
-            .with_context(|| format!("removing checkpoint temp file {:?}", temp_path))?;
-        Ok(())
     }
 
     fn cleanup_indexes(&self) -> anyhow::Result<()> {

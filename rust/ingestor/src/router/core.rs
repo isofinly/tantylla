@@ -4,7 +4,6 @@ use ahash::AHashMap;
 use anyhow::{Context, Result};
 use scylla::client::session::Session;
 use scylla_cdc::consumer::OperationType;
-use tokio::sync::Mutex;
 
 use tantylla_common::{
     indexer::{
@@ -16,72 +15,15 @@ use tracing::{debug, warn};
 
 use crate::{
     batch::service::{BatchItem, Service},
-    router::utils::{self, ClusteringKeyColumn},
+    router::{
+        common::PendingRangeStart,
+        utils::{self, ClusteringKeyColumn},
+    },
 };
 
 const FLUSH_RETRIES: usize = 3;
 
-/// The resolved routing intent for a CDC row.
-enum RoutingAction {
-    Skip,
-    RangeDeleteStart,
-    RangeDeleteEnd,
-    Forward { op_type: OpType },
-}
-
-impl RoutingAction {
-    fn determine(row: &scylla_cdc::consumer::CDCRow<'_>) -> anyhow::Result<Self> {
-        let action = match &row.operation {
-            OperationType::PreImage => Self::Skip,
-
-            OperationType::RowRangeDelInclLeft | OperationType::RowRangeDelExclLeft => {
-                Self::RangeDeleteStart
-            }
-
-            OperationType::RowRangeDelInclRight | OperationType::RowRangeDelExclRight => {
-                Self::RangeDeleteEnd
-            }
-
-            OperationType::RowInsert | OperationType::RowUpdate | OperationType::PostImage => {
-                Self::Forward {
-                    op_type: OpType::Upsert,
-                }
-            }
-
-            OperationType::RowDelete => Self::Forward {
-                op_type: OpType::Delete,
-            },
-
-            OperationType::PartitionDelete => Self::Forward {
-                op_type: OpType::PartitionDelete,
-            },
-        };
-        Ok(action)
-    }
-}
-
-/// Represents one half (the start) of a CDC range delete pair.
-///
-/// ScyllaDB CDC encodes a range delete as exactly two log rows sharing
-/// the same `cdc$time`:
-///   - Row 1: start bound (op 5 = inclusive, 6 = exclusive)
-///   - Row 2: end bound   (op 7 = inclusive, 8 = exclusive)
-#[derive(Debug)]
-struct PendingRangeStart {
-    /// Partition key values joined with ":" — identifies which node to query.
-    partition_key: String,
-    /// Target node address for this partition.
-    target_node: String,
-    /// Clustering key column values from the start-bound CDC row.
-    /// `None` for a given column means that side is unbounded.
-    ck_values: Vec<Option<String>>,
-    /// Whether the start bound is inclusive (op 5) or exclusive (op 6).
-    start_inclusive: bool,
-    /// The writetime extracted from the CDC timeuuid.
-    writetime: u64,
-}
-
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct Router {
     node_info: AHashMap<usize, String>,
     batch_service: Arc<Service>,
@@ -89,7 +31,6 @@ pub(crate) struct Router {
     full_primary_key_columns: Vec<String>,
     clustering_key_columns: Vec<ClusteringKeyColumn>,
     table_name: String,
-    pending_range_start: Mutex<Option<PendingRangeStart>>,
 }
 
 impl Router {
@@ -109,32 +50,19 @@ impl Router {
             full_primary_key_columns: key_info.full_primary_key_columns,
             clustering_key_columns: key_info.clustering_key_columns,
             table_name: format!("{}.{}", keyspace, table),
-            pending_range_start: Mutex::new(None),
         })
     }
 
-    pub(crate) async fn route(&self, row: &scylla_cdc::consumer::CDCRow<'_>) -> anyhow::Result<()> {
-        let action = RoutingAction::determine(row).inspect_err(|e| {
-            tracing::debug!(
-                target: "test_event",
-                source = %TestEventSource::Ingestor,
-                event = %TestEvent::CdcRowRouteFailure,
-                error = %e,
-            );
-        })?;
-
-        match action {
-            RoutingAction::Skip => {
-                debug!("Skipping PreImage CDC row (informational only)");
-                return Ok(());
-            }
-            RoutingAction::RangeDeleteStart => return self.handle_range_delete_start(row).await,
-            RoutingAction::RangeDeleteEnd => return self.handle_range_delete_end(row).await,
-            RoutingAction::Forward { op_type: _ } => {
-                // handled below
-            }
-        }
-
+    /// Routes a forward CDC operation (insert / update / delete / partition
+    /// delete) to the appropriate search node.
+    ///
+    /// Checks backpressure first; if active, attempts a flush before
+    /// proceeding.
+    pub(crate) async fn route_forward(
+        &self,
+        row: &scylla_cdc::consumer::CDCRow<'_>,
+        op_type: OpType,
+    ) -> anyhow::Result<()> {
         if self.batch_service.is_backpressure_active() {
             debug!("Backpressure active, attempting to flush before routing");
             if let Err(e) = self.batch_service.flush().await {
@@ -144,10 +72,6 @@ impl Router {
                 ));
             }
         }
-
-        let RoutingAction::Forward { op_type } = action else {
-            unreachable!()
-        };
 
         let target_node_id =
             utils::get_target_node_id(row, &self.partition_key_columns, self.node_info.len());
@@ -220,14 +144,16 @@ impl Router {
         self.enqueue_batch_item(batch_item).await
     }
 
-    /// Handles the start-bound row of a range delete pair (ops 5-6).
+    /// Extracts a [`PendingRangeStart`] from a start-bound CDC row.
     ///
-    /// Stores the bound values so they can be combined with the end-bound
-    /// row that CDC guarantees will follow immediately.
-    async fn handle_range_delete_start(
+    /// The caller ([`super::super::cdc::consumer::Consumer`]) stores the
+    /// returned value in its own `Option<PendingRangeStart>` field.  This
+    /// keeps the pending state per-stream rather than shared across all
+    /// streams via a `Mutex`.
+    pub(crate) fn extract_range_delete_start(
         &self,
         row: &scylla_cdc::consumer::CDCRow<'_>,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<PendingRangeStart> {
         let start_inclusive = row.operation == OperationType::RowRangeDelInclLeft;
 
         let pk_values: Vec<String> = self
@@ -260,33 +186,24 @@ impl Router {
 
         let writetime = utils::extract_writetime_from_timeuuid(row.time)?;
 
-        let pending = PendingRangeStart {
+        Ok(PendingRangeStart {
             partition_key,
             target_node: target_node.clone(),
             ck_values,
             start_inclusive,
             writetime,
-        };
-
-        let mut lock = self.pending_range_start.lock().await;
-        if lock.is_some() {
-            warn!(
-                "Overwriting an unconsumed range-delete start bound; this may indicate a CDC ordering anomaly"
-            );
-        }
-        *lock = Some(pending);
-
-        Ok(())
+        })
     }
 
-    /// Handles the end-bound row of a range delete pair (ops 7-8).
+    /// Resolves a range-delete pair using the caller-supplied `start` bound
+    /// and the current end-bound `row`.
     ///
-    /// Combines with the previously-stored start bound, flushes the
-    /// current batch, queries the target node for all document IDs in
-    /// the partition, filters by the clustering key range, and enqueues
-    /// individual DELETE operations for each matching document.
-    async fn handle_range_delete_end(
+    /// Flushes the batch service before querying the target node for document
+    /// IDs, then enqueues individual DELETE operations for each matching
+    /// document.
+    pub(crate) async fn commit_range_delete(
         &self,
+        start: PendingRangeStart,
         row: &scylla_cdc::consumer::CDCRow<'_>,
     ) -> anyhow::Result<()> {
         let end_inclusive = row.operation == OperationType::RowRangeDelInclRight;
@@ -300,12 +217,6 @@ impl Router {
                     .map(|v| format!("{}", v))
             })
             .collect();
-
-        let start = {
-            let mut lock = self.pending_range_start.lock().await;
-            lock.take()
-                .context("received range-delete end bound without a matching start bound")?
-        };
 
         debug!(
             "Resolving range delete for partition_key={} on table {}",

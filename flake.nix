@@ -48,6 +48,9 @@
             license = licenses.mit;
           };
         };
+        terraformWrapper = pkgs.writeShellScriptBin "terraform" ''
+          exec ${pkgs.opentofu}/bin/tofu "$@"
+        '';
       in
       {
         devShells.default = pkgs.mkShell {
@@ -65,6 +68,8 @@
               cassandra
               cqlls
               cargo-deny
+              opentofu
+              terraformWrapper
             ]
             ++ protoTools;
 
@@ -76,6 +81,8 @@
             rustc --version
             cqlsh --version
             buf --version
+
+            alias terraform=tofu
           '';
         };
       }
