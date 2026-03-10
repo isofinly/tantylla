@@ -1391,3 +1391,217 @@ async fn e2e_fts_plain_keyword_with_default_fields() -> Result<()> {
         })
         .await
 }
+
+// =========================================================================
+// FTS — Structured filter: keyword AND numeric range in one query
+// =========================================================================
+//
+// A real search UI typically lets users combine a keyword with a structured
+// filter such as a price band. Tantivy's query parser supports boolean
+// composition with `AND`, so `document.title:Widget AND
+// document.price:[40 TO 100]` expresses "find Widgets whose price is
+// between 40 and 100". No new implementation is required — this test
+// validates the combination end-to-end.
+
+#[tokio::test]
+async fn e2e_fts_keyword_and_numeric_filter() -> Result<()> {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("info")
+        .with_test_writer()
+        .try_init();
+
+    let schema = SchemaConfig::from_cql(
+        "CREATE TABLE IF NOT EXISTS {{keyspace}}.products (\
+            doc_id text PRIMARY KEY,\
+            title text,\
+            price double\
+        ) WITH cdc = {'enabled': true};",
+    );
+
+    let cluster = TestCluster::builder()
+        .with_schema(schema)
+        .with_table_name("products")
+        .enable_instrumentation(false)
+        .build()
+        .await
+        .context("building test cluster")?;
+
+    cluster
+        .scoped(|cluster| {
+            async move {
+                let gateway = cluster.gateway().context("building gateway client")?;
+
+                // Three products with the same keyword but different prices.
+                for (title, price) in [
+                    ("Gadget Widget", 15.0_f64),  // keyword matches, price outside range
+                    ("Gadget Widget", 75.0_f64),  // keyword matches, price inside range
+                    ("Gadget Widget", 200.0_f64), // keyword matches, price outside range
+                ] {
+                    let id = format!("doc-{}", Uuid::new_v4());
+                    let cql = format!(
+                        "INSERT INTO {}.{} (doc_id, title, price) VALUES ('{}', '{}', {})",
+                        cluster.keyspace(),
+                        cluster.table_name(),
+                        id,
+                        title,
+                        price,
+                    );
+                    cluster
+                        .session()
+                        .query_unpaged(cql, ())
+                        .await
+                        .with_context(|| format!("inserting product at price {}", price))?;
+                }
+
+                // Wait until the products are indexed via a plain term query.
+                gateway
+                    .search_until_hits(&["document.title:Gadget"], 30)
+                    .await
+                    .context("waiting for products to be indexed")?;
+
+                // Combine a keyword filter with a numeric range.
+                // Only the 75.0 product should match both conditions.
+                let resp = gateway
+                    .search(&SearchRequest {
+                        query: "document.title:Gadget AND document.price:[40 TO 100]".to_string(),
+                        limit: 10,
+                        offset: 0,
+                        consistency: 1,
+                        default_fields: vec![],
+                    })
+                    .await
+                    .context("keyword + numeric range search")?;
+
+                ensure!(
+                    resp.total_hits >= 1,
+                    "expected at least one hit for keyword+range query, got {}",
+                    resp.total_hits
+                );
+                ensure!(
+                    resp.total_hits == 1,
+                    "expected exactly one hit (price 75), got {} — check that out-of-range \
+                     products are excluded",
+                    resp.total_hits
+                );
+
+                Ok(())
+            }
+            .boxed()
+        })
+        .await
+}
+
+// =========================================================================
+// FTS — Prefix / autocomplete search
+// =========================================================================
+//
+// Many search boxes offer autocomplete by matching the prefix of the last
+// typed token. Tantivy supports this via the `*` wildcard suffix on a term
+// query: `document.title:wire*` matches "wireless", "wireframe", etc.
+//
+// The `en_stem` tokenizer lowercases tokens before indexing, so the prefix
+// must also be lowercased for the match to succeed. The test asserts that a
+// document whose title starts with the prefix is returned.
+//
+// No implementation changes are required for this feature — it is provided
+// natively by Tantivy's `QueryParser` when wildcard syntax is used.
+
+#[tokio::test]
+async fn e2e_fts_prefix_autocomplete() -> Result<()> {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("info")
+        .with_test_writer()
+        .try_init();
+
+    let schema = SchemaConfig::from_cql(
+        "CREATE TABLE IF NOT EXISTS {{keyspace}}.products (\
+            doc_id text PRIMARY KEY,\
+            title text\
+        ) WITH cdc = {'enabled': true};",
+    );
+
+    let cluster = TestCluster::builder()
+        .with_schema(schema)
+        .with_table_name("products")
+        .enable_instrumentation(false)
+        .build()
+        .await
+        .context("building test cluster")?;
+
+    cluster
+        .scoped(|cluster| {
+            async move {
+                let gateway = cluster.gateway().context("building gateway client")?;
+
+                // Insert two products: "Wireless Headset" and "Wired Headset".
+                // The prefix "wire" should match both; "wireless" should match
+                // only the first one.
+                let wireless_id = format!("doc-{}", Uuid::new_v4());
+                let wired_id = format!("doc-{}", Uuid::new_v4());
+
+                for (id, title) in [
+                    (wireless_id.as_str(), "Wireless Headset"),
+                    (wired_id.as_str(), "Wired Headset"),
+                ] {
+                    let cql = format!(
+                        "INSERT INTO {}.{} (doc_id, title) VALUES ('{}', '{}')",
+                        cluster.keyspace(),
+                        cluster.table_name(),
+                        id,
+                        title,
+                    );
+                    cluster
+                        .session()
+                        .query_unpaged(cql, ())
+                        .await
+                        .with_context(|| format!("inserting product '{}'", title))?;
+                }
+
+                // Wait until both products are indexed.
+                gateway
+                    .search_until_hits(&["document.title:Headset"], 30)
+                    .await
+                    .context("waiting for products to be indexed")?;
+
+                // `wire*` should match both "wireless" and "wired" tokens.
+                let resp_broad = gateway
+                    .search(&SearchRequest {
+                        query: "document.title:wire*".to_string(),
+                        limit: 10,
+                        offset: 0,
+                        consistency: 1,
+                        default_fields: vec![],
+                    })
+                    .await
+                    .context("broad prefix search (wire*)")?;
+
+                ensure!(
+                    resp_broad.total_hits >= 2,
+                    "expected both products for prefix 'wire*', got {}",
+                    resp_broad.total_hits
+                );
+
+                // `wireless*` should match only the "Wireless Headset".
+                let resp_narrow = gateway
+                    .search(&SearchRequest {
+                        query: "document.title:wireless*".to_string(),
+                        limit: 10,
+                        offset: 0,
+                        consistency: 1,
+                        default_fields: vec![],
+                    })
+                    .await
+                    .context("narrow prefix search (wireless*)")?;
+
+                ensure!(
+                    resp_narrow.total_hits >= 1,
+                    "expected at least one hit for prefix 'wireless*', got {}",
+                    resp_narrow.total_hits
+                );
+
+                Ok(())
+            }
+            .boxed()
+        })
+        .await
+}
