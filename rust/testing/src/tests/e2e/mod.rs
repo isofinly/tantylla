@@ -1,0 +1,15 @@
+mod cdc_basic;
+mod cdc_checkpoint;
+mod cdc_delete_operations;
+mod cdc_set_operations;
+mod fts_boosted_multifield;
+mod fts_facets;
+mod fts_fuzzy;
+mod fts_keyword_numeric_filter;
+mod fts_log_timerange;
+mod fts_negative;
+mod fts_nested_relational;
+mod fts_numeric_range;
+mod fts_phrase;
+mod fts_plain_keyword;
+mod fts_prefix_autocomplete;
