@@ -1139,13 +1139,20 @@ async fn e2e_fts_phrase_search() -> Result<()> {
                 cluster.session().query_unpaged(insert_match, ()).await.context("inserting phrase-match doc")?;
                 cluster.session().query_unpaged(insert_nomatch, ()).await.context("inserting phrase-nomatch doc")?;
 
-                // Wait until the phrase-match doc appears via a term query first.
+                // Wait for BOTH documents to be indexed before running the
+                // phrase query. Waiting only for the phrase-match doc would
+                // let the negative assertion pass vacuously if the no-match
+                // doc hasn't been committed yet.
                 gateway
-                    .search_until_hits(&["document.body:\"noise cancellation\""], 30)
+                    .search_until_hits(&["document.title:Headphones"], 30)
                     .await
-                    .context("waiting for phrase match to become searchable")?;
+                    .context("waiting for phrase-match doc to be indexed")?;
+                gateway
+                    .search_until_hits(&["document.title:Speakers"], 30)
+                    .await
+                    .context("waiting for phrase-nomatch doc to be indexed")?;
 
-                // Confirm the no-match doc is NOT returned for the phrase.
+                // Confirm the phrase query returns only the matching doc.
                 let resp = gateway
                     .search(&SearchRequest {
                         query: r#"document.body:"noise cancellation""#.to_string(),
@@ -1161,8 +1168,9 @@ async fn e2e_fts_phrase_search() -> Result<()> {
                     .context("phrase search")?;
 
                 ensure!(
-                    resp.total_hits >= 1,
-                    "expected at least one phrase hit, got {}",
+                    resp.total_hits == 1,
+                    "expected exactly one phrase hit, got {} — \
+                     phrase ordering may not be enforced",
                     resp.total_hits
                 );
 
@@ -1171,6 +1179,15 @@ async fn e2e_fts_phrase_search() -> Result<()> {
                 ensure!(
                     ids.contains(&match_id.as_str()),
                     "phrase-match doc not found in hits: {:?}",
+                    ids
+                );
+
+                // Verify the no-match document is NOT returned.
+                // "cancellation of noise" contains the same words but not as
+                // a contiguous phrase, so it must be excluded.
+                ensure!(
+                    !ids.contains(&nomatch_id.as_str()),
+                    "phrase-nomatch doc incorrectly returned in hits: {:?}",
                     ids
                 );
 
@@ -1322,11 +1339,30 @@ async fn e2e_fts_numeric_range() -> Result<()> {
                         .with_context(|| format!("inserting product '{}'", title))?;
                 }
 
-                // Wait for any of the products to be indexed.
-                gateway
-                    .search_until_hits(&["document.title:Widget"], 30)
-                    .await
-                    .context("waiting for products to be indexed")?;
+                // Wait for ALL three products to be indexed before running
+                // the range query. Asserting `== 1` is only meaningful when
+                // the out-of-range products have already been committed;
+                // otherwise a single in-range hit could pass vacuously.
+                for _ in 0..60 {
+                    let resp = gateway
+                        .search(&SearchRequest {
+                            query: "document.title:Widget".to_string(),
+                            limit: 10,
+                            offset: 0,
+                            consistency: 1,
+                            default_fields: vec![],
+                            facet_fields: vec![],
+                            boost_fields: vec![],
+                            group_by_partition: false,
+                        })
+                        .await
+                        .context("polling for all Widget products")?;
+
+                    if resp.total_hits >= 3 {
+                        break;
+                    }
+                    sleep(Duration::from_millis(500)).await;
+                }
 
                 // Query for products in the 40–100 price range.
                 // Only "Mid Widget" (59.99) should match.
@@ -1345,8 +1381,8 @@ async fn e2e_fts_numeric_range() -> Result<()> {
                     .context("numeric range search")?;
 
                 ensure!(
-                    resp.total_hits >= 1,
-                    "expected at least one hit for price range [40 TO 100], got {}",
+                    resp.total_hits == 1,
+                    "expected exactly one hit for price range [40 TO 100] (Mid Widget), got {}",
                     resp.total_hits
                 );
 
@@ -1498,11 +1534,29 @@ async fn e2e_fts_keyword_and_numeric_filter() -> Result<()> {
                         .with_context(|| format!("inserting product at price {}", price))?;
                 }
 
-                // Wait until the products are indexed via a plain term query.
-                gateway
-                    .search_until_hits(&["document.title:Gadget"], 30)
-                    .await
-                    .context("waiting for products to be indexed")?;
+                // Wait until ALL three products are indexed so the filter
+                // assertion is meaningful. With only one doc indexed, an
+                // `== 1` check passes vacuously.
+                for _ in 0..60 {
+                    let resp = gateway
+                        .search(&SearchRequest {
+                            query: "document.title:Gadget".to_string(),
+                            limit: 10,
+                            offset: 0,
+                            consistency: 1,
+                            default_fields: vec![],
+                            facet_fields: vec![],
+                            boost_fields: vec![],
+                            group_by_partition: false,
+                        })
+                        .await
+                        .context("polling for all Gadget products")?;
+
+                    if resp.total_hits >= 3 {
+                        break;
+                    }
+                    sleep(Duration::from_millis(500)).await;
+                }
 
                 // Combine a keyword filter with a numeric range.
                 // Only the 75.0 product should match both conditions.
@@ -1520,11 +1574,6 @@ async fn e2e_fts_keyword_and_numeric_filter() -> Result<()> {
                     .await
                     .context("keyword + numeric range search")?;
 
-                ensure!(
-                    resp.total_hits >= 1,
-                    "expected at least one hit for keyword+range query, got {}",
-                    resp.total_hits
-                );
                 ensure!(
                     resp.total_hits == 1,
                     "expected exactly one hit (price 75), got {} — check that out-of-range \
@@ -1605,11 +1654,30 @@ async fn e2e_fts_prefix_autocomplete() -> Result<()> {
                         .with_context(|| format!("inserting product '{}'", title))?;
                 }
 
-                // Wait until both products are indexed.
-                gateway
-                    .search_until_hits(&["document.title:Headset"], 30)
-                    .await
-                    .context("waiting for products to be indexed")?;
+                // Wait until BOTH products are indexed. The broad prefix
+                // assertion (`wire*` → 2 hits) is only valid when both
+                // docs have been committed; waiting for just one "Headset"
+                // creates a race where only one doc may be indexed.
+                for _ in 0..60 {
+                    let resp = gateway
+                        .search(&SearchRequest {
+                            query: "document.title:Headset".to_string(),
+                            limit: 10,
+                            offset: 0,
+                            consistency: 1,
+                            default_fields: vec![],
+                            facet_fields: vec![],
+                            boost_fields: vec![],
+                            group_by_partition: false,
+                        })
+                        .await
+                        .context("polling for both Headset products")?;
+
+                    if resp.total_hits >= 2 {
+                        break;
+                    }
+                    sleep(Duration::from_millis(500)).await;
+                }
 
                 // `wire*` should match both "wireless" and "wired" tokens.
                 let resp_broad = gateway
@@ -1627,8 +1695,8 @@ async fn e2e_fts_prefix_autocomplete() -> Result<()> {
                     .context("broad prefix search (wire*)")?;
 
                 ensure!(
-                    resp_broad.total_hits >= 2,
-                    "expected both products for prefix 'wire*', got {}",
+                    resp_broad.total_hits == 2,
+                    "expected exactly 2 products for prefix 'wire*', got {}",
                     resp_broad.total_hits
                 );
 
@@ -1648,8 +1716,9 @@ async fn e2e_fts_prefix_autocomplete() -> Result<()> {
                     .context("narrow prefix search (wireless*)")?;
 
                 ensure!(
-                    resp_narrow.total_hits >= 1,
-                    "expected at least one hit for prefix 'wireless*', got {}",
+                    resp_narrow.total_hits == 1,
+                    "expected exactly one hit for prefix 'wireless*', got {} — \
+                     'wired' should not match 'wireless*'",
                     resp_narrow.total_hits
                 );
 
@@ -1745,11 +1814,30 @@ async fn e2e_fts_log_time_range_keyword() -> Result<()> {
                         .with_context(|| format!("inserting event at ts={}", ts))?;
                 }
 
-                // Wait until any of the events is indexed.
-                gateway
-                    .search_until_hits(&["document.message:timeout"], 30)
-                    .await
-                    .context("waiting for events to be indexed")?;
+                // Wait until ALL three events are indexed. The combined
+                // keyword + time-range assertion (`== 1`) is only valid
+                // when all three events have been committed; otherwise the
+                // out-of-window events might not yet exist in the index.
+                for _ in 0..60 {
+                    let resp = gateway
+                        .search(&SearchRequest {
+                            query: "document.message:timeout".to_string(),
+                            limit: 10,
+                            offset: 0,
+                            consistency: 1,
+                            default_fields: vec![],
+                            facet_fields: vec![],
+                            boost_fields: vec![],
+                            group_by_partition: false,
+                        })
+                        .await
+                        .context("polling for all timeout events")?;
+
+                    if resp.total_hits >= 3 {
+                        break;
+                    }
+                    sleep(Duration::from_millis(500)).await;
+                }
 
                 // Keyword "timeout" matches all three, but the time-range window
                 // should narrow it to exactly one (the 2022 event).
@@ -1772,13 +1860,8 @@ async fn e2e_fts_log_time_range_keyword() -> Result<()> {
                     .context("log time-range + keyword search")?;
 
                 ensure!(
-                    resp.total_hits >= 1,
-                    "expected at least one hit inside the time window, got {}",
-                    resp.total_hits
-                );
-                ensure!(
                     resp.total_hits == 1,
-                    "expected exactly one hit (2022 event), got {} — \
+                    "expected exactly one hit (2022 event) inside the time window, got {} — \
                      check that events outside the window are excluded",
                     resp.total_hits
                 );
@@ -2206,6 +2289,176 @@ async fn e2e_fts_nested_relational_group_by_partition() -> Result<()> {
                     "expected exactly 2 grouped hits (one per user), got {} \
                      — group_by_partition deduplication may not be working",
                     grouped_resp.hits.len()
+                );
+
+                // Verify the two hits represent distinct partitions (user_a
+                // and user_b) rather than two rows from the same partition.
+                // The `partition_key` stored field holds the ScyllaDB
+                // partition key for each document.
+                let partition_keys: Vec<&str> = grouped_resp
+                    .hits
+                    .iter()
+                    .map(|h| h["partition_key"].as_str().unwrap_or(""))
+                    .collect();
+
+                ensure!(
+                    partition_keys.contains(&user_a.as_str()),
+                    "user_a partition missing from grouped hits: {:?}",
+                    partition_keys
+                );
+                ensure!(
+                    partition_keys.contains(&user_b.as_str()),
+                    "user_b partition missing from grouped hits: {:?}",
+                    partition_keys
+                );
+
+                Ok(())
+            }
+            .boxed()
+        })
+        .await
+}
+
+// =========================================================================
+// FTS — Negative / zero-hit tests
+// =========================================================================
+//
+// Every positive test above proves that matching documents ARE returned.
+// These negative tests prove that NON-matching documents are NOT returned,
+// covering the three most common silent-failure modes:
+//
+//   1. Phrase word-order mismatch  — "cancellation noise" must not match
+//      a phrase index for "noise cancellation".
+//   2. Fuzzy over-matching         — a typo with edit distance > 1 must not
+//      match when the query specifies ~1.
+//   3. Numeric range exclusion     — a document outside the query range
+//      must return zero hits.
+//
+// A single cluster with one table is reused across all three sub-cases to
+// keep startup overhead minimal.
+
+#[tokio::test]
+async fn e2e_fts_negative_no_false_positives() -> Result<()> {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("info")
+        .with_test_writer()
+        .try_init();
+
+    let schema = SchemaConfig::from_cql(
+        "CREATE TABLE IF NOT EXISTS {{keyspace}}.items (\
+            doc_id text PRIMARY KEY,\
+            title text,\
+            body text,\
+            price double\
+        ) WITH cdc = {'enabled': true};",
+    );
+
+    let cluster = TestCluster::builder()
+        .with_schema(schema)
+        .with_table_name("items")
+        .enable_instrumentation(false)
+        .build()
+        .await
+        .context("building test cluster")?;
+
+    cluster
+        .scoped(|cluster| {
+            async move {
+                let gateway = cluster.gateway().context("building gateway client")?;
+
+                // ── Fixture: one document used by all three sub-cases ─────────
+                let doc_id = format!("doc-{}", Uuid::new_v4());
+                let insert_cql = format!(
+                    "INSERT INTO {}.{} (doc_id, title, body, price) \
+                     VALUES ('{}', 'Bluetooth Speaker', 'noise cancellation module', 250.0)",
+                    cluster.keyspace(),
+                    cluster.table_name(),
+                    doc_id,
+                );
+                cluster
+                    .session()
+                    .query_unpaged(insert_cql, ())
+                    .await
+                    .context("inserting negative-test fixture")?;
+
+                // Wait for the document to be indexed before running any
+                // negative queries.
+                gateway
+                    .search_until_hits(&["document.title:Bluetooth"], 30)
+                    .await
+                    .context("waiting for fixture to be indexed")?;
+
+                // ── Sub-case 1: phrase word-order mismatch ─────────────────
+                //
+                // "cancellation noise" has the words in reverse order; the
+                // index stores positions for "noise cancellation", so this
+                // phrase must return zero hits.
+                let resp_phrase = gateway
+                    .search(&SearchRequest {
+                        query: r#"document.body:"cancellation noise""#.to_string(),
+                        limit: 10,
+                        offset: 0,
+                        consistency: 1,
+                        default_fields: vec![],
+                        facet_fields: vec![],
+                        boost_fields: vec![],
+                        group_by_partition: false,
+                    })
+                    .await
+                    .context("phrase word-order mismatch search")?;
+
+                ensure!(
+                    resp_phrase.total_hits == 0,
+                    "reversed phrase 'cancellation noise' should return 0 hits, got {}",
+                    resp_phrase.total_hits
+                );
+
+                // ── Sub-case 2: fuzzy edit distance exceeded ───────────────
+                //
+                // "blutoth" differs from "bluetooth" by 2 edits; a ~1 query
+                // must not match it.
+                let resp_fuzzy = gateway
+                    .search(&SearchRequest {
+                        query: "document.title:blutoth~1".to_string(),
+                        limit: 10,
+                        offset: 0,
+                        consistency: 1,
+                        default_fields: vec![],
+                        facet_fields: vec![],
+                        boost_fields: vec![],
+                        group_by_partition: false,
+                    })
+                    .await
+                    .context("fuzzy over-distance search")?;
+
+                ensure!(
+                    resp_fuzzy.total_hits == 0,
+                    "fuzzy query 'blutoth~1' (distance 2 from 'bluetooth') should return 0 hits, got {}",
+                    resp_fuzzy.total_hits
+                );
+
+                // ── Sub-case 3: numeric range exclusion ───────────────────
+                //
+                // The fixture has price 250.0; a range of [10 TO 100] must
+                // return zero hits.
+                let resp_range = gateway
+                    .search(&SearchRequest {
+                        query: "document.price:[10 TO 100]".to_string(),
+                        limit: 10,
+                        offset: 0,
+                        consistency: 1,
+                        default_fields: vec![],
+                        facet_fields: vec![],
+                        boost_fields: vec![],
+                        group_by_partition: false,
+                    })
+                    .await
+                    .context("out-of-range numeric search")?;
+
+                ensure!(
+                    resp_range.total_hits == 0,
+                    "price range [10 TO 100] should return 0 hits (fixture is 250.0), got {}",
+                    resp_range.total_hits
                 );
 
                 Ok(())
