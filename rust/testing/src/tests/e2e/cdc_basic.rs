@@ -29,8 +29,8 @@ async fn e2e_cdc_to_gateway_search() -> Result<()> {
                     .event_from_source(TestEventSource::Node, TestEvent::Startup)
                     .event_from_source(TestEventSource::Gateway, TestEvent::Startup)
                     .event_from_source(TestEventSource::Ingestor, TestEvent::Startup);
-                trace_collector
-                    .wait_for_sequence(&startup_sequence, 20)
+                let (_startup_events, cursor) = trace_collector
+                    .wait_for_sequence_after(&startup_sequence, 0, 20)
                     .await
                     .context("waiting for startup sequence")?;
 
@@ -47,8 +47,8 @@ async fn e2e_cdc_to_gateway_search() -> Result<()> {
                     .event_from_source(TestEventSource::Node, TestEvent::IndexBatchResponse)
                     .event_from_source(TestEventSource::Ingestor, TestEvent::BatchFlushNodeSuccess)
                     .event_from_source(TestEventSource::Ingestor, TestEvent::BatchFlushSuccess);
-                let matched_events = trace_collector
-                    .wait_for_sequence(&ingestion_sequence, 20)
+                let (matched_events, cursor) = trace_collector
+                    .wait_for_sequence_after(&ingestion_sequence, cursor, 20)
                     .await?;
 
                 let index_event = matched_events
@@ -103,8 +103,8 @@ async fn e2e_cdc_to_gateway_search() -> Result<()> {
                     .event_from_source(TestEventSource::Node, TestEvent::SearchResponse)
                     .event_from_source(TestEventSource::Gateway, TestEvent::SearchResponse);
                 // TODO: Use this variable
-                let _matched_events = trace_collector
-                    .wait_for_sequence(&search_sequence, 20)
+                let (_matched_events, _cursor) = trace_collector
+                    .wait_for_sequence_after(&search_sequence, cursor, 20)
                     .await
                     .context("waiting for search trace sequence")?;
 

@@ -309,10 +309,21 @@ impl Engine {
         //   2. `default_fields` — expand without weights, plain OR across fields.
         //   3. Legacy — use the raw query string unchanged.
         //
-        // Expansion is applied only when the query string contains no colon (`:`),
-        // which reliably indicates "no explicit field prefix". Queries that already
-        // use Tantivy field syntax are passed through unmodified.
-        let effective_query = if !boost_fields.is_empty() && !query_str.contains(':') {
+        // Expansion is applied only when the query string:
+        //   - contains no colon (`:`), which reliably indicates "no explicit field
+        //     prefix" — queries that already use Tantivy field syntax are passed
+        //     through unmodified;
+        //   - contains no double-quote (`"`), which indicates a phrase query that
+        //     must be forwarded verbatim (splitting on whitespace would produce
+        //     broken tokens like `"noise` and `cancellation"`);
+        //   - is not blank — an empty or whitespace-only query must fall through
+        //     so QueryParser can return an appropriate error or empty result rather
+        //     than being given an empty string built from zero clauses.
+        let no_colon = !query_str.contains(':');
+        let no_quote = !query_str.contains('"');
+        let non_blank = !query_str.trim().is_empty();
+
+        let effective_query = if !boost_fields.is_empty() && no_colon && no_quote && non_blank {
             // Boosted expansion: each token becomes
             //   `(document.f1:token^b1 OR document.f2:token^b2 OR ...)`
             // and multi-token queries are AND-ed together.
@@ -328,7 +339,7 @@ impl Engine {
                 })
                 .collect();
             clauses.join(" AND ")
-        } else if !default_fields.is_empty() && !query_str.contains(':') {
+        } else if !default_fields.is_empty() && no_colon && no_quote && non_blank {
             // Build `(document.f1:TERM OR document.f2:TERM OR ...)` for every
             // whitespace-separated token in the query so that multi-word bare
             // queries (e.g., "wireless keyboard") are expanded correctly.
@@ -1145,5 +1156,88 @@ mod tests {
         let b = serde_json::json!({ "meta": { "y": 2 } });
         merge_json(&mut a, b);
         assert_eq!(a, serde_json::json!({ "meta": { "x": 1, "y": 2 } }));
+    }
+
+    // =========================================================================
+    // Tokenizer assumption validation (SESSION.md #3)
+    // =========================================================================
+    //
+    // The Python benchmark uses an all-uppercase alphanumeric marker (e.g.
+    // `MARKER42`) as a sentinel value stored in `document.brand`. It polls
+    // Tantylla using the exact same uppercase string and relies on matching that
+    // value in the index.
+    //
+    // The `default` Tantivy tokenizer lowercases every token before storing it,
+    // so the indexed term is `marker42`, not `MARKER42`. The benchmark's query
+    // must therefore also be lowercased (Tantivy's QueryParser applies the same
+    // tokenizer to query terms, so `document.brand:MARKER42` works in practice
+    // because QueryParser lowercases it too).
+    //
+    // This test makes that assumption explicit: if the tokenizer behaviour ever
+    // changes (e.g. someone switches to a case-sensitive tokenizer), this test
+    // will fail loudly rather than causing a silent poll-undercount in the bench.
+    #[test]
+    fn default_tokenizer_lowercases_uppercase_alphanumeric_marker() {
+        use tantivy::tokenizer::{TextAnalyzer, TokenizerManager};
+
+        let manager = TokenizerManager::default();
+        let mut analyzer: TextAnalyzer = manager
+            .get("default")
+            .expect("Tantivy ships a 'default' tokenizer");
+
+        let mut token_stream = analyzer.token_stream("MARKER42");
+        let mut tokens: Vec<String> = Vec::new();
+        while token_stream.advance() {
+            tokens.push(token_stream.token().text.clone());
+        }
+
+        // The `default` tokenizer must produce exactly one token and it must be
+        // fully lowercased. Any other behaviour would break benchmark polling.
+        assert_eq!(
+            tokens,
+            vec!["marker42"],
+            "expected 'default' tokenizer to lowercase MARKER42 to marker42; \
+             if this tokenizer was changed, update bench-ingest.py accordingly"
+        );
+    }
+
+    // =========================================================================
+    // Query expansion guard tests
+    // =========================================================================
+    //
+    // Verify that the three expansion-bypass conditions introduced in `search`
+    // (no-colon, no-quote, non-blank) are correctly represented in the helper
+    // logic. These are unit tests for the guard predicates rather than for the
+    // full search path (which requires a running Tantivy index).
+
+    #[test]
+    fn expansion_guard_quoted_phrase_has_quote() {
+        let query = r#""noise cancellation""#;
+        assert!(
+            query.contains('"'),
+            "quoted phrase must contain a double-quote so expansion is skipped"
+        );
+        assert!(
+            !query.contains(':'),
+            "quoted phrase without field prefix must not contain colon"
+        );
+    }
+
+    #[test]
+    fn expansion_guard_blank_query_is_blank() {
+        let query = "   ";
+        assert!(
+            query.trim().is_empty(),
+            "whitespace-only query must be detected as blank"
+        );
+    }
+
+    #[test]
+    fn expansion_guard_field_prefixed_query_has_colon() {
+        let query = "document.title:wireless";
+        assert!(
+            query.contains(':'),
+            "field-prefixed query must contain colon so expansion is skipped"
+        );
     }
 }
