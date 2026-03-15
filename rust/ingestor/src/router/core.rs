@@ -85,7 +85,7 @@ impl Router {
             .partition_key_columns
             .iter()
             .map(|col_name| match row.get_value(col_name) {
-                Some(val) => format!("{}", val),
+                Some(val) => utils::cql_value_to_key_string(val),
                 None => "null".to_string(),
             })
             .collect();
@@ -98,7 +98,7 @@ impl Router {
             .full_primary_key_columns
             .iter()
             .map(|col_name| match row.get_value(col_name) {
-                Some(val) => format!("{}", val),
+                Some(val) => utils::cql_value_to_key_string(val),
                 None => "null".to_string(),
             })
             .collect();
@@ -160,7 +160,7 @@ impl Router {
             .partition_key_columns
             .iter()
             .map(|col_name| match row.get_value(col_name) {
-                Some(val) => format!("{}", val),
+                Some(val) => utils::cql_value_to_key_string(val),
                 None => "null".to_string(),
             })
             .collect();
@@ -180,7 +180,7 @@ impl Router {
             .map(|ck_col| {
                 row.get_value(&ck_col.name)
                     .as_ref()
-                    .map(|v| format!("{}", v))
+                    .map(utils::cql_value_to_key_string)
             })
             .collect();
 
@@ -214,7 +214,7 @@ impl Router {
             .map(|ck_col| {
                 row.get_value(&ck_col.name)
                     .as_ref()
-                    .map(|v| format!("{}", v))
+                    .map(utils::cql_value_to_key_string)
             })
             .collect();
 

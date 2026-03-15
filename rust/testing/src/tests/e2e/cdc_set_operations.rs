@@ -1,5 +1,5 @@
-use crate::cluster::TestCluster;
 use crate::cluster::SchemaConfig;
+use crate::cluster::TestCluster;
 use crate::trace::TraceSequence;
 use anyhow::{Context, Result, bail};
 use futures::FutureExt;

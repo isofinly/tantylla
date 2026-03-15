@@ -263,6 +263,12 @@ message SearchHit {
   // The stored document content (as JSON).
   // Gateway will aggregate these.
   string payload_json = 3;
+
+  // The ScyllaDB partition key for this document.
+  // Populated by the node from the stored `partition_key` Tantivy field.
+  // Enables callers to correlate hits back to their originating partition
+  // without parsing `payload_json`.
+  string partition_key = 4;
 }
 
 // ------------------------------------------------------------

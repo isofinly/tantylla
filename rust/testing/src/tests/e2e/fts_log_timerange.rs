@@ -1,5 +1,5 @@
-use crate::cluster::{SchemaConfig, TestCluster};
 use crate::cluster::gateway::SearchRequest;
+use crate::cluster::{SchemaConfig, TestCluster};
 use anyhow::{Context, Result, ensure};
 use futures::FutureExt;
 use tokio::time::{Duration, sleep};

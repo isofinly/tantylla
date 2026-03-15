@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use dashmap::{DashMap, DashSet};
 use serde::{Deserialize, Serialize};
 use tantivy::collector::{Count, DocSetCollector, TopDocs};
-use tantivy::query::{BooleanQuery, Occur, QueryParser, RangeQuery};
+use tantivy::query::{BooleanQuery, FuzzyTermQuery, Occur, QueryParser, RangeQuery};
 use tantivy::schema::{
     FAST, Field, IndexRecordOption, JsonObjectOptions, STORED, STRING, Schema, TextFieldIndexing,
     Value,
@@ -96,11 +96,24 @@ impl Engine {
         let field_expires_at = schema_builder.add_i64_field("expires_at", FAST | STORED);
         // No need to interact with writetime field. We can safely ignore its handle.
         let _ = schema_builder.add_i64_field("writetime", FAST | STORED);
+        // The `default` tokenizer lowercases and tokenises text without stemming,
+        // preserving the exact token forms needed for prefix queries (`wire*`),
+        // phrase queries (`"noise cancellation"`), and fuzzy queries (`wireles~1`).
+        //
+        // The `en_stem` tokenizer would stem "wireless" → "wireless" and
+        // "cancellation" → "cancell", which breaks prefix/phrase/fuzzy matching
+        // because the query terms and indexed terms no longer share a common form.
+        //
+        // `.set_fast(None)` promotes numeric leaf values inside the JSON object to
+        // Tantivy columnar (fast) fields, which is required for range queries
+        // (`document.price:[40 TO 100]`). Without this, Tantivy raises
+        // "RangeQuery on JSON is only supported for fast fields currently".
         let json_options = JsonObjectOptions::default()
             .set_stored()
+            .set_fast(None)
             .set_indexing_options(
                 TextFieldIndexing::default()
-                    .set_tokenizer("en_stem")
+                    .set_tokenizer("default")
                     .set_index_option(IndexRecordOption::WithFreqsAndPositions),
             );
         let field_doc = schema_builder.add_json_field("document", json_options);
@@ -335,8 +348,38 @@ impl Engine {
             query_str.to_owned()
         };
 
-        let query_parser = QueryParser::for_index(&self.index, vec![self.field_doc]);
-        let query = query_parser.parse_query(&effective_query)?;
+        // =========================================================================
+        // Special-case query rewriting for JSON subfield prefix and fuzzy queries
+        // =========================================================================
+        //
+        // Tantivy's QueryParser does not produce a `PrefixQuery` or a correct
+        // `FuzzyTermQuery` when the field being queried is a JSON field
+        // (`document`) and the syntax is `document.subfield:token*` or
+        // `document.subfield:token~N`.
+        //
+        // For prefix queries (`wire*`), QueryParser silently emits a plain
+        // `TermQuery` for the exact token "wire" — which matches nothing because
+        // no document has the token "wire" stored verbatim.
+        //
+        // For fuzzy queries (`wireles~1`), QueryParser parses `"wireles~1"` as a
+        // phrase query for the two-token sequence ["wireles", "1"] — also wrong.
+        //
+        // We intercept these single-clause patterns before the QueryParser and
+        // build proper Tantivy queries using `Term::from_field_json_path` +
+        // `term.append_type_and_str`, which is the correct API for addressing
+        // a JSON subfield's term index.
+        //
+        // Only single-clause `document.<path>:<token>*` and
+        // `document.<path>:<token>~<N>` queries are rewritten. Everything else
+        // (AND/OR, phrase queries, boosted terms, range queries) still goes
+        // through QueryParser as before.
+        let query: Box<dyn tantivy::query::Query> =
+            if let Some(special) = try_build_json_special_query(&effective_query, self.field_doc) {
+                special
+            } else {
+                let query_parser = QueryParser::for_index(&self.index, vec![self.field_doc]);
+                query_parser.parse_query(&effective_query)?
+            };
 
         let now_term = Term::from_field_i64(self.field_expires_at, start_micros);
 
@@ -404,6 +447,11 @@ impl Engine {
                         .unwrap_or("")
                         .to_string();
                     let doc_json_str = retrieved_doc.to_json(&self.schema);
+                    let partition_key = retrieved_doc
+                        .get_first(self.field_partition_key)
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
                     let payload_json = serde_json::from_str::<serde_json::Value>(&doc_json_str)
                         .ok()
                         .and_then(|mut v| match v.get_mut("document") {
@@ -419,6 +467,7 @@ impl Engine {
                         id,
                         score,
                         payload_json,
+                        partition_key,
                     })
                 })
                 .collect::<Result<Vec<_>>>()?
@@ -440,6 +489,12 @@ impl Engine {
 
                 let doc_json_str = retrieved_doc.to_json(&self.schema);
 
+                let partition_key = retrieved_doc
+                    .get_first(self.field_partition_key)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+
                 let payload_json = serde_json::from_str::<serde_json::Value>(&doc_json_str)
                     .ok()
                     .and_then(|mut v| match v.get_mut("document") {
@@ -456,6 +511,7 @@ impl Engine {
                     id,
                     score,
                     payload_json,
+                    partition_key,
                 });
             }
             hits
@@ -728,6 +784,86 @@ impl Engine {
 
         ids
     }
+}
+
+/// Builds a proper Tantivy query for JSON subfield prefix or fuzzy patterns
+/// that QueryParser cannot handle correctly.
+///
+/// Tantivy's QueryParser silently mishandles two syntactic patterns when the
+/// target is a JSON field (`document`):
+///
+/// * `document.subfield:token*` — QueryParser emits a plain `TermQuery` for
+///   the exact token, missing all prefix matches.
+/// * `document.subfield:token~N` — QueryParser emits a `PhraseQuery` for the
+///   two-token sequence ["token", "N"], matching nothing.
+///
+/// The correct approach for JSON fields is to build the term manually using
+/// `Term::from_field_json_path` + `term.append_type_and_str` (which encodes
+/// the `JSON_END_OF_PATH` separator and type tag that Tantivy stores internally)
+/// and then wrap it in `FuzzyTermQuery`.
+///
+/// Only simple single-clause queries of the form
+/// `document.<json_path>:<token>*` or `document.<json_path>:<token>~<N>` are
+/// rewritten. Compound queries (containing spaces, AND/OR, parentheses) are
+/// left unchanged so that QueryParser handles them.
+///
+/// Returns `None` if the query does not match either pattern, signalling that
+/// the caller should fall through to the QueryParser path.
+fn try_build_json_special_query(
+    query_str: &str,
+    field_doc: Field,
+) -> Option<Box<dyn tantivy::query::Query>> {
+    let trimmed = query_str.trim();
+
+    // Reject compound queries (spaces mean AND/OR/phrase, parentheses mean
+    // grouping, quotes mean phrase). We only rewrite simple single-clause
+    // patterns where the entire query string is of the form:
+    //   document.<path>:<token>*   or   document.<path>:<token>~<N>
+    if trimmed.contains(' ') || trimmed.contains('(') || trimmed.contains('"') {
+        return None;
+    }
+
+    // Split at the first `:` to get the field path and the value pattern.
+    let colon_pos = trimmed.find(':')?;
+    let field_part = &trimmed[..colon_pos];
+    let value_part = &trimmed[colon_pos + 1..];
+
+    // Only intercept queries targeting the `document` JSON field.
+    let json_subpath = field_part.strip_prefix("document.")?;
+
+    // Prefix query: `document.<path>:<token>*`
+    if let Some(prefix_token) = value_part.strip_suffix('*')
+        && !prefix_token.is_empty()
+        && !prefix_token.contains('*')
+    {
+        let token = prefix_token.to_lowercase();
+        // Build the JSON-path term manually. `Term::from_field_json_path`
+        // writes the path + `\x00` separator; `append_type_and_str` writes
+        // the Tantivy type tag ('s' for Str) + the token bytes.
+        let mut term = Term::from_field_json_path(field_doc, json_subpath, false);
+        term.append_type_and_str(&token);
+        // Distance 0 with `new_prefix` == exact-prefix match; this is the
+        // only reliable way to issue a prefix query against a JSON subfield.
+        return Some(Box::new(FuzzyTermQuery::new_prefix(term, 0, true)));
+    }
+
+    // Fuzzy query: `document.<path>:<token>~<N>`
+    if let Some(tilde_pos) = value_part.rfind('~') {
+        let token_part = &value_part[..tilde_pos];
+        let dist_str = &value_part[tilde_pos + 1..];
+        if !token_part.is_empty()
+            && !token_part.contains('~')
+            && let Ok(dist) = dist_str.parse::<u8>()
+            && dist <= 2
+        {
+            let token = token_part.to_lowercase();
+            let mut term = Term::from_field_json_path(field_doc, json_subpath, false);
+            term.append_type_and_str(&token);
+            return Some(Box::new(FuzzyTermQuery::new(term, dist, true)));
+        }
+    }
+
+    None
 }
 
 fn now_micros() -> i64 {

@@ -1,5 +1,5 @@
-use crate::cluster::{SchemaConfig, TestCluster};
 use crate::cluster::gateway::{BoostField, SearchRequest};
+use crate::cluster::{SchemaConfig, TestCluster};
 use anyhow::{Context, Result, ensure};
 use futures::FutureExt;
 use uuid::Uuid;
