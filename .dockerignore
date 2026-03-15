@@ -1,0 +1,5 @@
+scylladb/
+benchmarks/data/output
+benchmarks/.venv
+benchmarks/.terraform
+benchmarks/terraform.tfstate.d
