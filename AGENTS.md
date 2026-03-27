@@ -18,6 +18,10 @@ Developers are ultimately responsible and accountable for all code, whether it i
 └── AGENTS.md # This file
 ```
 
+### Interaction with scylladb
+
+See [CI-ISSUES.md](CI-ISSUES.md)
+
 ### Commands
 
 - TODO
