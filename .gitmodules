@@ -1,0 +1,3 @@
+[submodule "scylladb"]
+	path = scylladb
+	url = https://github.com/isofinly/scylladb
