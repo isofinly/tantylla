@@ -7,7 +7,8 @@ use scylla_cdc::consumer::OperationType;
 
 use tantylla_common::{
     indexer::{
-        ListDocIdsRequest, index_operation::OpType, index_service_client::IndexServiceClient,
+        IndexServiceListDocumentIdsByPartitionKeyRequest, index_operation::OpType,
+        index_service_client::IndexServiceClient,
     },
     tracing::events::{TestEvent, TestEventSource},
 };
@@ -282,9 +283,11 @@ impl Router {
             .context("connect to node for range delete resolution")?;
 
         let response = client
-            .list_document_ids_by_partition_key(tonic::Request::new(ListDocIdsRequest {
-                partition_key: partition_key.to_owned(),
-            }))
+            .list_document_ids_by_partition_key(tonic::Request::new(
+                IndexServiceListDocumentIdsByPartitionKeyRequest {
+                    partition_key: partition_key.to_owned(),
+                },
+            ))
             .await
             .context("gRPC request to list document IDs by partition key")?;
 

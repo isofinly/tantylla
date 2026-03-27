@@ -3,7 +3,8 @@ use anyhow::Result;
 use tantylla_common::{
     indexer::{
         HealthCheckRequest, HealthCheckResponse, IndexBatchRequest, IndexBatchResponse,
-        ListDocIdsRequest, ListDocIdsResponse, SearchRequest, SearchResponse,
+        IndexServiceListDocumentIdsByPartitionKeyRequest,
+        IndexServiceListDocumentIdsByPartitionKeyResponse, SearchRequest, SearchResponse,
         index_service_server::IndexService,
     },
     tracing::events::{TestEvent, TestEventSource},
@@ -122,8 +123,8 @@ impl IndexService for IndexServiceService {
 
     async fn list_document_ids_by_partition_key(
         &self,
-        request: Request<ListDocIdsRequest>,
-    ) -> Result<Response<ListDocIdsResponse>, Status> {
+        request: Request<IndexServiceListDocumentIdsByPartitionKeyRequest>,
+    ) -> Result<Response<IndexServiceListDocumentIdsByPartitionKeyResponse>, Status> {
         let req = request.into_inner();
         debug!(
             "Listing document IDs for partition_key={}",
@@ -134,7 +135,9 @@ impl IndexService for IndexServiceService {
             .engine
             .list_document_ids_by_partition_key(&req.partition_key);
 
-        Ok(Response::new(ListDocIdsResponse { document_ids }))
+        Ok(Response::new(
+            IndexServiceListDocumentIdsByPartitionKeyResponse { document_ids },
+        ))
     }
 
     async fn health_check(

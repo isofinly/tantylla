@@ -16,7 +16,7 @@ service IndexService {
   // Used by the ingestor to resolve range deletes: the ingestor queries
   // for candidate document IDs, filters by clustering key range locally,
   // and then issues individual DELETE operations.
-  rpc ListDocumentIdsByPartitionKey(ListDocIdsRequest) returns (ListDocIdsResponse);
+  rpc ListDocumentIdsByPartitionKey(IndexServiceListDocumentIdsByPartitionKeyRequest) returns (IndexServiceListDocumentIdsByPartitionKeyResponse);
 
   // Simple health check for the Ingestor/Gateway to know if this node is alive.
   rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
@@ -275,13 +275,13 @@ message SearchHit {
 // List Document IDs Messages
 // ------------------------------------------------------------
 
-message ListDocIdsRequest {
+message IndexServiceListDocumentIdsByPartitionKeyRequest {
   // The partition key value to search for.
   // Must match the `partition_key` field indexed on documents.
   string partition_key = 1;
 }
 
-message ListDocIdsResponse {
+message IndexServiceListDocumentIdsByPartitionKeyResponse {
   // All document IDs that share the given partition key.
   repeated string document_ids = 1;
 }
