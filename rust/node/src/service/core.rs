@@ -1,9 +1,10 @@
-use crate::engine::core::{AdaptiveConfig, Engine};
+use crate::engine::core::{AdaptiveConfig, Engine, SearchParams};
 use anyhow::Result;
 use tantylla_common::{
     indexer::{
         HealthCheckRequest, HealthCheckResponse, IndexBatchRequest, IndexBatchResponse,
-        ListDocIdsRequest, ListDocIdsResponse, SearchRequest, SearchResponse,
+        IndexServiceListDocumentIdsByPartitionKeyRequest,
+        IndexServiceListDocumentIdsByPartitionKeyResponse, SearchRequest, SearchResponse,
         index_service_server::IndexService,
     },
     tracing::events::{TestEvent, TestEventSource},
@@ -89,10 +90,15 @@ impl IndexService for IndexServiceService {
             offset
         );
 
-        match self
-            .engine
-            .search(&req.query, req.limit as usize, req.offset as usize)
-        {
+        match self.engine.search(SearchParams {
+            query_str: &req.query,
+            limit: req.limit as usize,
+            offset: req.offset as usize,
+            default_fields: &req.default_fields,
+            facet_fields: &req.facet_fields,
+            boost_fields: &req.boost_fields,
+            group_by_partition: req.group_by_partition,
+        }) {
             Ok(response) => {
                 tracing::debug!(
                     target: "test_event",
@@ -117,8 +123,8 @@ impl IndexService for IndexServiceService {
 
     async fn list_document_ids_by_partition_key(
         &self,
-        request: Request<ListDocIdsRequest>,
-    ) -> Result<Response<ListDocIdsResponse>, Status> {
+        request: Request<IndexServiceListDocumentIdsByPartitionKeyRequest>,
+    ) -> Result<Response<IndexServiceListDocumentIdsByPartitionKeyResponse>, Status> {
         let req = request.into_inner();
         debug!(
             "Listing document IDs for partition_key={}",
@@ -129,7 +135,9 @@ impl IndexService for IndexServiceService {
             .engine
             .list_document_ids_by_partition_key(&req.partition_key);
 
-        Ok(Response::new(ListDocIdsResponse { document_ids }))
+        Ok(Response::new(
+            IndexServiceListDocumentIdsByPartitionKeyResponse { document_ids },
+        ))
     }
 
     async fn health_check(

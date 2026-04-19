@@ -16,7 +16,7 @@ service IndexService {
   // Used by the ingestor to resolve range deletes: the ingestor queries
   // for candidate document IDs, filters by clustering key range locally,
   // and then issues individual DELETE operations.
-  rpc ListDocumentIdsByPartitionKey(ListDocIdsRequest) returns (ListDocIdsResponse);
+  rpc ListDocumentIdsByPartitionKey(IndexServiceListDocumentIdsByPartitionKeyRequest) returns (IndexServiceListDocumentIdsByPartitionKeyResponse);
 
   // Simple health check for the Ingestor/Gateway to know if this node is alive.
   rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
@@ -165,6 +165,76 @@ message SearchRequest {
     CONSISTENCY_ALL = 2;
   }
   Consistency consistency = 4;
+
+  // Optional list of document sub-field names (without the "document." prefix)
+  // to use as default search fields when the query string does not contain an
+  // explicit field prefix.
+  //
+  // When non-empty, a bare query such as `wireless` is expanded by the node
+  // into `(document.<f1>:wireless OR document.<f2>:wireless OR ...)` before
+  // being handed to Tantivy's QueryParser. When empty, the node falls back to
+  // the legacy behaviour of using the entire `document` JSON field as the
+  // sole default field.
+  repeated string default_fields = 5;
+
+  // List of document sub-field names (without the "document." prefix) to
+  // aggregate bucket counts over. When non-empty, the response `facets` field
+  // will contain one `FacetResult` per requested field with the unique values
+  // and their document counts across all matching documents.
+  // Empty means no aggregation is performed (no overhead).
+  repeated string facet_fields = 6;
+
+  // Per-field boost weights for bare-keyword query expansion.
+  //
+  // When non-empty and the query string contains no explicit field prefix (`:`),
+  // the node expands each whitespace-separated token into
+  //   `(document.<f1>:<token>^<b1> OR document.<f2>:<token>^<b2> OR ...)`
+  // so that matches in high-priority fields (e.g., title) rank above matches
+  // in lower-priority fields (e.g., body) even when both contain the term.
+  //
+  // If both `boost_fields` and `default_fields` are set, `boost_fields` takes
+  // precedence for the expansion (it subsumes `default_fields` with weights).
+  // Empty means no boosted expansion is applied.
+  repeated BoostField boost_fields = 7;
+
+  // When true, the node deduplicates hits by ScyllaDB partition key before
+  // applying limit/offset, returning at most one hit per partition (the
+  // highest-scoring document in that partition). This enables "parent-child"
+  // relational queries: find the distinct parent entities (partitions) that
+  // have at least one child row matching the query predicate.
+  //
+  // Because the ingestor routes all rows of the same partition to the same
+  // node (via hash(partition_key) % N), no cross-node deduplication is needed;
+  // the gateway merges results normally.
+  //
+  // `total_hits` in the response remains the raw matching-document count.
+  // Callers can compare `hits.len()` vs `total_hits` to detect deduplication.
+  bool group_by_partition = 8;
+}
+
+// A field-name + boost-weight pair for boosted multi-field query expansion.
+message BoostField {
+  // Sub-field name without the "document." prefix (e.g., "title").
+  string field = 1;
+  // Multiplicative boost factor applied to BM25 scores for this field.
+  // Values > 1.0 promote the field; values < 1.0 demote it.
+  float boost = 2;
+}
+
+// A single bucket in a facet aggregation result.
+message FacetBucket {
+  // The unique field value (as a string).
+  string value = 1;
+  // Number of matching documents that contain this value.
+  uint64 count = 2;
+}
+
+// Aggregation result for a single facet field.
+message FacetResult {
+  // The document sub-field name (without "document." prefix) that was faceted.
+  string field = 1;
+  // Buckets for this field, sorted by count descending.
+  repeated FacetBucket buckets = 2;
 }
 
 message SearchResponse {
@@ -177,6 +247,10 @@ message SearchResponse {
 
   // Duration of the search in the node (debug/monitoring).
   uint64 duration_ms = 3;
+
+  // Facet aggregation results, one per requested `facet_fields` entry.
+  // Empty when `facet_fields` was not specified in the request.
+  repeated FacetResult facets = 4;
 }
 
 message SearchHit {
@@ -189,19 +263,25 @@ message SearchHit {
   // The stored document content (as JSON).
   // Gateway will aggregate these.
   string payload_json = 3;
+
+  // The ScyllaDB partition key for this document.
+  // Populated by the node from the stored `partition_key` Tantivy field.
+  // Enables callers to correlate hits back to their originating partition
+  // without parsing `payload_json`.
+  string partition_key = 4;
 }
 
 // ------------------------------------------------------------
 // List Document IDs Messages
 // ------------------------------------------------------------
 
-message ListDocIdsRequest {
+message IndexServiceListDocumentIdsByPartitionKeyRequest {
   // The partition key value to search for.
   // Must match the `partition_key` field indexed on documents.
   string partition_key = 1;
 }
 
-message ListDocIdsResponse {
+message IndexServiceListDocumentIdsByPartitionKeyResponse {
   // All document IDs that share the given partition key.
   repeated string document_ids = 1;
 }

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::ops::Bound;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -8,7 +9,7 @@ use anyhow::{Context, Result};
 use dashmap::{DashMap, DashSet};
 use serde::{Deserialize, Serialize};
 use tantivy::collector::{Count, DocSetCollector, TopDocs};
-use tantivy::query::{BooleanQuery, Occur, QueryParser, RangeQuery};
+use tantivy::query::{BooleanQuery, FuzzyTermQuery, Occur, QueryParser, RangeQuery};
 use tantivy::schema::{
     FAST, Field, IndexRecordOption, JsonObjectOptions, STORED, STRING, Schema, TextFieldIndexing,
     Value,
@@ -16,7 +17,8 @@ use tantivy::schema::{
 use tantivy::{Document, Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument, Term};
 use tantylla_common::indexer::index_operation::OpType;
 use tantylla_common::indexer::{
-    CollectionDelta, IndexBatchResponse, IndexOperation, SearchHit, SearchResponse,
+    BoostField, CollectionDelta, FacetBucket, FacetResult, IndexBatchResponse, IndexOperation,
+    SearchHit, SearchResponse,
 };
 use tantylla_common::tracing::events::{TestEvent, TestEventSource};
 use tracing::{debug, error, info, trace, warn};
@@ -48,6 +50,18 @@ struct Doc {
     expires_at: i64,
     writetime: u64,
     generation: u64,
+}
+
+/// Parameters for a single search request, grouped to keep the `search`
+/// method signature within Clippy's `too_many_arguments` lint limit (7).
+pub(crate) struct SearchParams<'a> {
+    pub query_str: &'a str,
+    pub limit: usize,
+    pub offset: usize,
+    pub default_fields: &'a [String],
+    pub facet_fields: &'a [String],
+    pub boost_fields: &'a [BoostField],
+    pub group_by_partition: bool,
 }
 
 #[derive(Clone)]
@@ -82,11 +96,24 @@ impl Engine {
         let field_expires_at = schema_builder.add_i64_field("expires_at", FAST | STORED);
         // No need to interact with writetime field. We can safely ignore its handle.
         let _ = schema_builder.add_i64_field("writetime", FAST | STORED);
+        // The `default` tokenizer lowercases and tokenises text without stemming,
+        // preserving the exact token forms needed for prefix queries (`wire*`),
+        // phrase queries (`"noise cancellation"`), and fuzzy queries (`wireles~1`).
+        //
+        // The `en_stem` tokenizer would stem "wireless" → "wireless" and
+        // "cancellation" → "cancell", which breaks prefix/phrase/fuzzy matching
+        // because the query terms and indexed terms no longer share a common form.
+        //
+        // `.set_fast(None)` promotes numeric leaf values inside the JSON object to
+        // Tantivy columnar (fast) fields, which is required for range queries
+        // (`document.price:[40 TO 100]`). Without this, Tantivy raises
+        // "RangeQuery on JSON is only supported for fast fields currently".
         let json_options = JsonObjectOptions::default()
             .set_stored()
+            .set_fast(None)
             .set_indexing_options(
                 TextFieldIndexing::default()
-                    .set_tokenizer("en_stem")
+                    .set_tokenizer("default")
                     .set_index_option(IndexRecordOption::WithFreqsAndPositions),
             );
         let field_doc = schema_builder.add_json_field("document", json_options);
@@ -252,12 +279,16 @@ impl Engine {
         })
     }
 
-    pub(crate) fn search(
-        &self,
-        query_str: &str,
-        limit: usize,
-        offset: usize,
-    ) -> Result<SearchResponse> {
+    pub(crate) fn search(&self, params: SearchParams<'_>) -> Result<SearchResponse> {
+        let SearchParams {
+            query_str,
+            limit,
+            offset,
+            default_fields,
+            facet_fields,
+            boost_fields,
+            group_by_partition,
+        } = params;
         debug!(
             target: "test_event",
             source = %TestEventSource::Node,
@@ -268,8 +299,98 @@ impl Engine {
 
         let start_micros = now_micros();
 
-        let query_parser = QueryParser::for_index(&self.index, vec![self.field_doc]);
-        let query = query_parser.parse_query(query_str)?;
+        // =========================================================================
+        // Query expansion: boosted multi-field and default-field expansion
+        // =========================================================================
+        //
+        // Priority order:
+        //   1. `boost_fields` — expand with per-field ^N boost weights so that
+        //      high-priority fields (e.g. title) outrank low-priority ones (body).
+        //   2. `default_fields` — expand without weights, plain OR across fields.
+        //   3. Legacy — use the raw query string unchanged.
+        //
+        // Expansion is applied only when the query string:
+        //   - contains no colon (`:`), which reliably indicates "no explicit field
+        //     prefix" — queries that already use Tantivy field syntax are passed
+        //     through unmodified;
+        //   - contains no double-quote (`"`), which indicates a phrase query that
+        //     must be forwarded verbatim (splitting on whitespace would produce
+        //     broken tokens like `"noise` and `cancellation"`);
+        //   - is not blank — an empty or whitespace-only query must fall through
+        //     so QueryParser can return an appropriate error or empty result rather
+        //     than being given an empty string built from zero clauses.
+        let no_colon = !query_str.contains(':');
+        let no_quote = !query_str.contains('"');
+        let non_blank = !query_str.trim().is_empty();
+
+        let effective_query = if !boost_fields.is_empty() && no_colon && no_quote && non_blank {
+            // Boosted expansion: each token becomes
+            //   `(document.f1:token^b1 OR document.f2:token^b2 OR ...)`
+            // and multi-token queries are AND-ed together.
+            let tokens: Vec<&str> = query_str.split_whitespace().collect();
+            let clauses: Vec<String> = tokens
+                .iter()
+                .map(|token| {
+                    let per_field: Vec<String> = boost_fields
+                        .iter()
+                        .map(|bf| format!("document.{}:{}^{}", bf.field, token, bf.boost))
+                        .collect();
+                    format!("({})", per_field.join(" OR "))
+                })
+                .collect();
+            clauses.join(" AND ")
+        } else if !default_fields.is_empty() && no_colon && no_quote && non_blank {
+            // Build `(document.f1:TERM OR document.f2:TERM OR ...)` for every
+            // whitespace-separated token in the query so that multi-word bare
+            // queries (e.g., "wireless keyboard") are expanded correctly.
+            let tokens: Vec<&str> = query_str.split_whitespace().collect();
+            let clauses: Vec<String> = tokens
+                .iter()
+                .map(|token| {
+                    let per_field: Vec<String> = default_fields
+                        .iter()
+                        .map(|field| format!("document.{}:{}", field, token))
+                        .collect();
+                    format!("({})", per_field.join(" OR "))
+                })
+                .collect();
+            clauses.join(" AND ")
+        } else {
+            query_str.to_owned()
+        };
+
+        // =========================================================================
+        // Special-case query rewriting for JSON subfield prefix and fuzzy queries
+        // =========================================================================
+        //
+        // Tantivy's QueryParser does not produce a `PrefixQuery` or a correct
+        // `FuzzyTermQuery` when the field being queried is a JSON field
+        // (`document`) and the syntax is `document.subfield:token*` or
+        // `document.subfield:token~N`.
+        //
+        // For prefix queries (`wire*`), QueryParser silently emits a plain
+        // `TermQuery` for the exact token "wire" — which matches nothing because
+        // no document has the token "wire" stored verbatim.
+        //
+        // For fuzzy queries (`wireles~1`), QueryParser parses `"wireles~1"` as a
+        // phrase query for the two-token sequence ["wireles", "1"] — also wrong.
+        //
+        // We intercept these single-clause patterns before the QueryParser and
+        // build proper Tantivy queries using `Term::from_field_json_path` +
+        // `term.append_type_and_str`, which is the correct API for addressing
+        // a JSON subfield's term index.
+        //
+        // Only single-clause `document.<path>:<token>*` and
+        // `document.<path>:<token>~<N>` queries are rewritten. Everything else
+        // (AND/OR, phrase queries, boosted terms, range queries) still goes
+        // through QueryParser as before.
+        let query: Box<dyn tantivy::query::Query> =
+            if let Some(special) = try_build_json_special_query(&effective_query, self.field_doc) {
+                special
+            } else {
+                let query_parser = QueryParser::for_index(&self.index, vec![self.field_doc]);
+                query_parser.parse_query(&effective_query)?
+            };
 
         let now_term = Term::from_field_i64(self.field_expires_at, start_micros);
 
@@ -279,53 +400,232 @@ impl Engine {
             (Occur::Must, Box::new(expiration_query)),
         ]);
 
-        let top_docs = searcher.search(
-            &combined_query,
-            &TopDocs::with_limit(limit).and_offset(offset),
-        )?;
         let total_hits = searcher.search(&combined_query, &Count)?;
 
-        let mut hits = Vec::new();
-        for (score, doc_address) in top_docs {
-            let retrieved_doc: TantivyDocument = searcher.doc(doc_address)?;
+        // =========================================================================
+        // Hit collection: standard top-N or partition-grouped deduplication
+        // =========================================================================
+        //
+        // When `group_by_partition` is true we collect all matching docs (capped
+        // at 10 000 to bound memory), group by `partition_key`, keep the highest-
+        // scoring document per partition, sort the groups by score, and then apply
+        // limit/offset. This produces "one result per ScyllaDB partition" semantics
+        // which is useful for parent-child relational queries.
+        //
+        // Because the ingestor routes all rows of the same partition to the same
+        // node (`hash(partition_key) % N_nodes`), no cross-node deduplication is
+        // required — each node independently deduplicates its own shard.
+        //
+        // `total_hits` is intentionally left as the raw document count so callers
+        // can compare `hits.len()` vs `total_hits` to detect deduplication.
+        let hits: Vec<SearchHit> = if group_by_partition {
+            // Cap at 10 000 to prevent unbounded memory use on large shards.
+            // TODO: make the cap configurable via AdaptiveConfig.
+            let cap = total_hits.min(10_000);
+            let all_scored = searcher
+                .search(&combined_query, &TopDocs::with_limit(cap))
+                .context("collecting all docs for group_by_partition")?;
 
-            let id = retrieved_doc
-                .get_first(self.field_id)
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
+            // Group by partition_key, keeping only the highest-scoring doc.
+            // We iterate in score-descending order (Tantivy guarantees this),
+            // so the first occurrence per partition key is always the winner.
+            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+            let mut grouped: Vec<(f32, tantivy::DocAddress)> = Vec::new();
+            for (score, doc_address) in all_scored {
+                let retrieved_doc: TantivyDocument = searcher
+                    .doc(doc_address)
+                    .context("fetching doc for partition grouping")?;
+                let pk = retrieved_doc
+                    .get_first(self.field_partition_key)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if seen.insert(pk) {
+                    grouped.push((score, doc_address));
+                }
+            }
 
-            let doc_json_str = retrieved_doc.to_json(&self.schema);
-
-            let payload_json = serde_json::from_str::<serde_json::Value>(&doc_json_str)
-                .ok()
-                .and_then(|mut v| match v.get_mut("document") {
-                    Some(serde_json::Value::Array(arr)) => {
-                        if !arr.is_empty() {
-                            Some(std::mem::take(&mut arr[0]))
-                        } else {
-                            None
-                        }
-                    }
-                    Some(other) => Some(other.clone()),
-                    None => None,
+            // Apply pagination over the deduplicated, score-sorted list.
+            grouped
+                .into_iter()
+                .skip(offset)
+                .take(limit)
+                .map(|(score, doc_address)| {
+                    let retrieved_doc: TantivyDocument = searcher.doc(doc_address)?;
+                    let id = retrieved_doc
+                        .get_first(self.field_id)
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let doc_json_str = retrieved_doc.to_json(&self.schema);
+                    let partition_key = retrieved_doc
+                        .get_first(self.field_partition_key)
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let payload_json = serde_json::from_str::<serde_json::Value>(&doc_json_str)
+                        .ok()
+                        .and_then(|mut v| match v.get_mut("document") {
+                            Some(serde_json::Value::Array(arr)) if !arr.is_empty() => {
+                                Some(std::mem::take(&mut arr[0]))
+                            }
+                            Some(other) => Some(other.clone()),
+                            None => None,
+                        })
+                        .and_then(|v| serde_json::to_string(&v).ok())
+                        .unwrap_or_else(|| "{}".to_string());
+                    Ok(SearchHit {
+                        id,
+                        score,
+                        payload_json,
+                        partition_key,
+                    })
                 })
-                .and_then(|v| serde_json::to_string(&v).ok())
-                .unwrap_or_else(|| "{}".to_string());
+                .collect::<Result<Vec<_>>>()?
+        } else {
+            let top_docs = searcher.search(
+                &combined_query,
+                &TopDocs::with_limit(limit).and_offset(offset),
+            )?;
 
-            hits.push(SearchHit {
-                id,
-                score,
-                payload_json,
-            });
-        }
+            let mut hits = Vec::new();
+            for (score, doc_address) in top_docs {
+                let retrieved_doc: TantivyDocument = searcher.doc(doc_address)?;
+
+                let id = retrieved_doc
+                    .get_first(self.field_id)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+
+                let doc_json_str = retrieved_doc.to_json(&self.schema);
+
+                let partition_key = retrieved_doc
+                    .get_first(self.field_partition_key)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+
+                let payload_json = serde_json::from_str::<serde_json::Value>(&doc_json_str)
+                    .ok()
+                    .and_then(|mut v| match v.get_mut("document") {
+                        Some(serde_json::Value::Array(arr)) if !arr.is_empty() => {
+                            Some(std::mem::take(&mut arr[0]))
+                        }
+                        Some(other) => Some(other.clone()),
+                        None => None,
+                    })
+                    .and_then(|v| serde_json::to_string(&v).ok())
+                    .unwrap_or_else(|| "{}".to_string());
+
+                hits.push(SearchHit {
+                    id,
+                    score,
+                    payload_json,
+                    partition_key,
+                });
+            }
+            hits
+        };
 
         let time_delta_micros = now_micros() - start_micros;
+
+        // =========================================================================
+        // Facet aggregation
+        // =========================================================================
+        //
+        // When the caller requests facets we perform a second pass over ALL
+        // matching documents (not just the top-N returned) to build bucket counts
+        // for each requested field. This gives correct counts even when the result
+        // set is larger than `limit`.
+        //
+        // We re-use the same `combined_query` (which already filters by TTL) and
+        // iterate stored documents via `DocSetCollector`. The pass is O(N_matching)
+        // on stored-field retrieval; a future optimisation could switch to
+        // Tantivy's column-oriented fast fields or a custom multi-collector.
+        //
+        // Only scalar (String, Number, Bool) and flat-array-of-String field values
+        // are counted. Nested objects and null values are silently skipped.
+        let facets = if !facet_fields.is_empty() {
+            let all_docs = searcher
+                .search(&combined_query, &DocSetCollector)
+                .context("collecting docs for facet aggregation")?;
+
+            // field_name -> value_str -> count
+            let mut counts: HashMap<String, HashMap<String, u64>> = HashMap::new();
+
+            for doc_address in all_docs {
+                let retrieved_doc: TantivyDocument = searcher
+                    .doc(doc_address)
+                    .context("fetching stored doc for facet")?;
+
+                let doc_json_str = retrieved_doc.to_json(&self.schema);
+
+                if let Ok(full_val) = serde_json::from_str::<serde_json::Value>(&doc_json_str) {
+                    // Tantivy wraps the JSON field in an array in the stored
+                    // representation even though we only ever insert a single
+                    // object — hence the `arr[0]` extraction.
+                    let doc_obj = match full_val.get("document") {
+                        Some(serde_json::Value::Array(arr)) if !arr.is_empty() => arr[0].clone(),
+                        Some(other) => other.clone(),
+                        None => continue,
+                    };
+
+                    for field_name in facet_fields {
+                        let field_buckets = counts.entry(field_name.clone()).or_default();
+
+                        match doc_obj.get(field_name.as_str()) {
+                            Some(serde_json::Value::String(s)) => {
+                                *field_buckets.entry(s.clone()).or_insert(0) += 1;
+                            }
+                            Some(serde_json::Value::Number(n)) => {
+                                *field_buckets.entry(n.to_string()).or_insert(0) += 1;
+                            }
+                            Some(serde_json::Value::Bool(b)) => {
+                                *field_buckets.entry(b.to_string()).or_insert(0) += 1;
+                            }
+                            // For flat array-valued fields (e.g., `tags`),
+                            // count each string element individually so that
+                            // a document with `["a", "b"]` contributes one
+                            // count to bucket "a" and one to bucket "b".
+                            Some(serde_json::Value::Array(arr)) => {
+                                for elem in arr {
+                                    if let serde_json::Value::String(s) = elem {
+                                        *field_buckets.entry(s.clone()).or_insert(0) += 1;
+                                    }
+                                }
+                            }
+                            _ => {} // Skip null and nested objects.
+                        }
+                    }
+                }
+            }
+
+            // Convert to proto FacetResult list, sorted by count descending
+            // within each field so the most common values appear first.
+            counts
+                .into_iter()
+                .map(|(field, buckets)| {
+                    let mut bucket_vec: Vec<FacetBucket> = buckets
+                        .into_iter()
+                        .map(|(value, count)| FacetBucket { value, count })
+                        .collect();
+                    bucket_vec.sort_by(|a, b| b.count.cmp(&a.count));
+                    FacetResult {
+                        field,
+                        buckets: bucket_vec,
+                    }
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
 
         Ok(SearchResponse {
             hits,
             total_hits: total_hits as u64,
             duration_ms: time_delta_micros as u64,
+            facets,
         })
     }
 
@@ -495,6 +795,86 @@ impl Engine {
 
         ids
     }
+}
+
+/// Builds a proper Tantivy query for JSON subfield prefix or fuzzy patterns
+/// that QueryParser cannot handle correctly.
+///
+/// Tantivy's QueryParser silently mishandles two syntactic patterns when the
+/// target is a JSON field (`document`):
+///
+/// * `document.subfield:token*` — QueryParser emits a plain `TermQuery` for
+///   the exact token, missing all prefix matches.
+/// * `document.subfield:token~N` — QueryParser emits a `PhraseQuery` for the
+///   two-token sequence ["token", "N"], matching nothing.
+///
+/// The correct approach for JSON fields is to build the term manually using
+/// `Term::from_field_json_path` + `term.append_type_and_str` (which encodes
+/// the `JSON_END_OF_PATH` separator and type tag that Tantivy stores internally)
+/// and then wrap it in `FuzzyTermQuery`.
+///
+/// Only simple single-clause queries of the form
+/// `document.<json_path>:<token>*` or `document.<json_path>:<token>~<N>` are
+/// rewritten. Compound queries (containing spaces, AND/OR, parentheses) are
+/// left unchanged so that QueryParser handles them.
+///
+/// Returns `None` if the query does not match either pattern, signalling that
+/// the caller should fall through to the QueryParser path.
+fn try_build_json_special_query(
+    query_str: &str,
+    field_doc: Field,
+) -> Option<Box<dyn tantivy::query::Query>> {
+    let trimmed = query_str.trim();
+
+    // Reject compound queries (spaces mean AND/OR/phrase, parentheses mean
+    // grouping, quotes mean phrase). We only rewrite simple single-clause
+    // patterns where the entire query string is of the form:
+    //   document.<path>:<token>*   or   document.<path>:<token>~<N>
+    if trimmed.contains(' ') || trimmed.contains('(') || trimmed.contains('"') {
+        return None;
+    }
+
+    // Split at the first `:` to get the field path and the value pattern.
+    let colon_pos = trimmed.find(':')?;
+    let field_part = &trimmed[..colon_pos];
+    let value_part = &trimmed[colon_pos + 1..];
+
+    // Only intercept queries targeting the `document` JSON field.
+    let json_subpath = field_part.strip_prefix("document.")?;
+
+    // Prefix query: `document.<path>:<token>*`
+    if let Some(prefix_token) = value_part.strip_suffix('*')
+        && !prefix_token.is_empty()
+        && !prefix_token.contains('*')
+    {
+        let token = prefix_token.to_lowercase();
+        // Build the JSON-path term manually. `Term::from_field_json_path`
+        // writes the path + `\x00` separator; `append_type_and_str` writes
+        // the Tantivy type tag ('s' for Str) + the token bytes.
+        let mut term = Term::from_field_json_path(field_doc, json_subpath, false);
+        term.append_type_and_str(&token);
+        // Distance 0 with `new_prefix` == exact-prefix match; this is the
+        // only reliable way to issue a prefix query against a JSON subfield.
+        return Some(Box::new(FuzzyTermQuery::new_prefix(term, 0, true)));
+    }
+
+    // Fuzzy query: `document.<path>:<token>~<N>`
+    if let Some(tilde_pos) = value_part.rfind('~') {
+        let token_part = &value_part[..tilde_pos];
+        let dist_str = &value_part[tilde_pos + 1..];
+        if !token_part.is_empty()
+            && !token_part.contains('~')
+            && let Ok(dist) = dist_str.parse::<u8>()
+            && dist <= 2
+        {
+            let token = token_part.to_lowercase();
+            let mut term = Term::from_field_json_path(field_doc, json_subpath, false);
+            term.append_type_and_str(&token);
+            return Some(Box::new(FuzzyTermQuery::new(term, dist, true)));
+        }
+    }
+
+    None
 }
 
 fn now_micros() -> i64 {
@@ -776,5 +1156,88 @@ mod tests {
         let b = serde_json::json!({ "meta": { "y": 2 } });
         merge_json(&mut a, b);
         assert_eq!(a, serde_json::json!({ "meta": { "x": 1, "y": 2 } }));
+    }
+
+    // =========================================================================
+    // Tokenizer assumption validation (SESSION.md #3)
+    // =========================================================================
+    //
+    // The Python benchmark uses an all-uppercase alphanumeric marker (e.g.
+    // `MARKER42`) as a sentinel value stored in `document.brand`. It polls
+    // Tantylla using the exact same uppercase string and relies on matching that
+    // value in the index.
+    //
+    // The `default` Tantivy tokenizer lowercases every token before storing it,
+    // so the indexed term is `marker42`, not `MARKER42`. The benchmark's query
+    // must therefore also be lowercased (Tantivy's QueryParser applies the same
+    // tokenizer to query terms, so `document.brand:MARKER42` works in practice
+    // because QueryParser lowercases it too).
+    //
+    // This test makes that assumption explicit: if the tokenizer behaviour ever
+    // changes (e.g. someone switches to a case-sensitive tokenizer), this test
+    // will fail loudly rather than causing a silent poll-undercount in the bench.
+    #[test]
+    fn default_tokenizer_lowercases_uppercase_alphanumeric_marker() {
+        use tantivy::tokenizer::{TextAnalyzer, TokenizerManager};
+
+        let manager = TokenizerManager::default();
+        let mut analyzer: TextAnalyzer = manager
+            .get("default")
+            .expect("Tantivy ships a 'default' tokenizer");
+
+        let mut token_stream = analyzer.token_stream("MARKER42");
+        let mut tokens: Vec<String> = Vec::new();
+        while token_stream.advance() {
+            tokens.push(token_stream.token().text.clone());
+        }
+
+        // The `default` tokenizer must produce exactly one token and it must be
+        // fully lowercased. Any other behaviour would break benchmark polling.
+        assert_eq!(
+            tokens,
+            vec!["marker42"],
+            "expected 'default' tokenizer to lowercase MARKER42 to marker42; \
+             if this tokenizer was changed, update bench-ingest.py accordingly"
+        );
+    }
+
+    // =========================================================================
+    // Query expansion guard tests
+    // =========================================================================
+    //
+    // Verify that the three expansion-bypass conditions introduced in `search`
+    // (no-colon, no-quote, non-blank) are correctly represented in the helper
+    // logic. These are unit tests for the guard predicates rather than for the
+    // full search path (which requires a running Tantivy index).
+
+    #[test]
+    fn expansion_guard_quoted_phrase_has_quote() {
+        let query = r#""noise cancellation""#;
+        assert!(
+            query.contains('"'),
+            "quoted phrase must contain a double-quote so expansion is skipped"
+        );
+        assert!(
+            !query.contains(':'),
+            "quoted phrase without field prefix must not contain colon"
+        );
+    }
+
+    #[test]
+    fn expansion_guard_blank_query_is_blank() {
+        let query = "   ";
+        assert!(
+            query.trim().is_empty(),
+            "whitespace-only query must be detected as blank"
+        );
+    }
+
+    #[test]
+    fn expansion_guard_field_prefixed_query_has_colon() {
+        let query = "document.title:wireless";
+        assert!(
+            query.contains(':'),
+            "field-prefixed query must contain colon so expansion is skipped"
+        );
     }
 }

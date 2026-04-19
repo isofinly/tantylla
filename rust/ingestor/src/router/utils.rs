@@ -130,6 +130,35 @@ pub(super) fn extract_writetime_from_timeuuid(time_uuid: Uuid) -> anyhow::Result
     Ok(micros)
 }
 
+/// Converts a `CqlValue` to a plain string suitable for use as a document ID
+/// or partition key component, without any CQL quoting.
+///
+/// `CqlValue::Display` wraps text values in single quotes (e.g. `'foo'`) to
+/// produce valid CQL literal syntax. That is correct for CQL output but wrong
+/// for our document ID field, which must be a bare, unquoted string so that
+/// the node can index and look up documents without extra quote stripping.
+///
+/// This function extracts the raw inner string for text-like types and falls
+/// back to the debug representation for any exotic type we have not handled.
+pub(super) fn cql_value_to_key_string(val: &CqlValue) -> String {
+    match val {
+        CqlValue::Ascii(s) | CqlValue::Text(s) => s.clone(),
+        CqlValue::Uuid(u) => u.to_string(),
+        CqlValue::Timeuuid(t) => t.to_string(),
+        CqlValue::Int(i) => i.to_string(),
+        CqlValue::BigInt(i) => i.to_string(),
+        CqlValue::Boolean(b) => b.to_string(),
+        CqlValue::Float(f) => f.to_string(),
+        CqlValue::Double(f) => f.to_string(),
+        CqlValue::Blob(b) => base64::engine::general_purpose::STANDARD.encode(b),
+        CqlValue::Inet(ip) => ip.to_string(),
+        // Fall back to the debug representation for any type we have not
+        // explicitly handled. This avoids silently producing CQL-quoted output
+        // for an unexpected variant.
+        _ => format!("{:?}", val),
+    }
+}
+
 fn cql_to_json(val: &CqlValue) -> Value {
     match val {
         CqlValue::Ascii(s) | CqlValue::Text(s) => Value::String(s.clone()),

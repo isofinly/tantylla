@@ -7,7 +7,8 @@ use scylla_cdc::consumer::OperationType;
 
 use tantylla_common::{
     indexer::{
-        ListDocIdsRequest, index_operation::OpType, index_service_client::IndexServiceClient,
+        IndexServiceListDocumentIdsByPartitionKeyRequest, index_operation::OpType,
+        index_service_client::IndexServiceClient,
     },
     tracing::events::{TestEvent, TestEventSource},
 };
@@ -85,7 +86,7 @@ impl Router {
             .partition_key_columns
             .iter()
             .map(|col_name| match row.get_value(col_name) {
-                Some(val) => format!("{}", val),
+                Some(val) => utils::cql_value_to_key_string(val),
                 None => "null".to_string(),
             })
             .collect();
@@ -98,7 +99,7 @@ impl Router {
             .full_primary_key_columns
             .iter()
             .map(|col_name| match row.get_value(col_name) {
-                Some(val) => format!("{}", val),
+                Some(val) => utils::cql_value_to_key_string(val),
                 None => "null".to_string(),
             })
             .collect();
@@ -160,7 +161,7 @@ impl Router {
             .partition_key_columns
             .iter()
             .map(|col_name| match row.get_value(col_name) {
-                Some(val) => format!("{}", val),
+                Some(val) => utils::cql_value_to_key_string(val),
                 None => "null".to_string(),
             })
             .collect();
@@ -180,7 +181,7 @@ impl Router {
             .map(|ck_col| {
                 row.get_value(&ck_col.name)
                     .as_ref()
-                    .map(|v| format!("{}", v))
+                    .map(utils::cql_value_to_key_string)
             })
             .collect();
 
@@ -214,7 +215,7 @@ impl Router {
             .map(|ck_col| {
                 row.get_value(&ck_col.name)
                     .as_ref()
-                    .map(|v| format!("{}", v))
+                    .map(utils::cql_value_to_key_string)
             })
             .collect();
 
@@ -282,9 +283,11 @@ impl Router {
             .context("connect to node for range delete resolution")?;
 
         let response = client
-            .list_document_ids_by_partition_key(tonic::Request::new(ListDocIdsRequest {
-                partition_key: partition_key.to_owned(),
-            }))
+            .list_document_ids_by_partition_key(tonic::Request::new(
+                IndexServiceListDocumentIdsByPartitionKeyRequest {
+                    partition_key: partition_key.to_owned(),
+                },
+            ))
             .await
             .context("gRPC request to list document IDs by partition key")?;
 

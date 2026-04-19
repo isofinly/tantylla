@@ -157,12 +157,36 @@ impl TraceCollector {
         sequence: &TraceSequence,
         timeout_secs_max: u64,
     ) -> anyhow::Result<Vec<TraceEvent>> {
+        let (matched, _cursor) = self
+            .wait_for_sequence_after(sequence, 0, timeout_secs_max)
+            .await?;
+        Ok(matched)
+    }
+
+    /// Like [`wait_for_sequence`] but begins scanning from `start_from` (a
+    /// previously returned cursor) and returns the new cursor position after
+    /// the last matched event.  The cursor is the index *past* the last matched
+    /// event, so the caller can pass it straight back on the next call to avoid
+    /// re-matching events from a prior phase.
+    ///
+    /// Use this when a single test calls `wait_for_sequence` more than once on
+    /// the same `TraceCollector` — passing the cursor forward prevents the
+    /// second call from satisfying itself against events that were already
+    /// consumed by the first call.
+    pub async fn wait_for_sequence_after(
+        &self,
+        sequence: &TraceSequence,
+        start_from: usize,
+        timeout_secs_max: u64,
+    ) -> anyhow::Result<(Vec<TraceEvent>, usize)> {
         let deadline = Duration::from_secs(timeout_secs_max);
         let result = timeout(deadline, async {
             loop {
                 let events = self.snapshot().await;
-                if let Some(matched) = match_sequence(&events, sequence) {
-                    return matched;
+                if let Some((matched, next_cursor)) =
+                    match_sequence_from(&events, sequence, start_from)
+                {
+                    return (matched, next_cursor);
                 }
                 tokio::task::yield_now().await;
             }
@@ -170,12 +194,13 @@ impl TraceCollector {
         .await;
 
         match result {
-            Ok(matched) => Ok(matched),
+            Ok(pair) => Ok(pair),
             Err(err) => {
                 let summary = self.last_events_summary().await;
                 Err(err).with_context(|| {
                     format!(
-                        "waiting for trace sequence: [{}]. observed: {}",
+                        "waiting for trace sequence (from cursor {}): [{}]. observed: {}",
+                        start_from,
                         sequence.describe(),
                         summary
                     )
@@ -250,9 +275,17 @@ impl TraceSequence {
     }
 }
 
-fn match_sequence(events: &[TraceEvent], sequence: &TraceSequence) -> Option<Vec<TraceEvent>> {
+/// Matches `sequence` against `events` starting at `start_from`.
+///
+/// Returns the matched events and the index *after* the last matched event so
+/// the caller can use it as the `start_from` argument for the next call.
+fn match_sequence_from(
+    events: &[TraceEvent],
+    sequence: &TraceSequence,
+    start_from: usize,
+) -> Option<(Vec<TraceEvent>, usize)> {
     let mut matched = Vec::with_capacity(sequence.steps.len());
-    let mut cursor = 0;
+    let mut cursor = start_from;
 
     for step in &sequence.steps {
         let mut found = None;
@@ -268,7 +301,7 @@ fn match_sequence(events: &[TraceEvent], sequence: &TraceSequence) -> Option<Vec
         cursor = idx + 1;
     }
 
-    Some(matched)
+    Some((matched, cursor))
 }
 
 impl TraceSequenceStep {
